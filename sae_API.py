@@ -1,13 +1,15 @@
 """
 SAE (Secure Application Entity) client — ETSI GS QKD 014.
+Programme client a mettre en conteneur
 
-Implements the REST calls a SAE makes to its KME:
-  - get_status()
-  - get_enc_key()  : master SAE  -> (key_ID, key)
-  - get_dec_key()  : slave  SAE  -> key   (given a key_ID)
+Peut demander des clés au KME et les transmettre a un autre SAE
 
-Plus a small end-to-end demo reproducing the whiteboard flow:
+Fonctions principales de la SAE :
+    - get_status
+    - get_key : master SAE  -> (key_ID, key)
+    - get_key_by_id : slave  SAE  -> key   (given a key_ID)
 
+Ce programme ajoute un systeme de suivi pour demo :
     SAE_A --REST/get--> KME  ==(key_ID travels over classic channel)==>  SAE_B
     SAE_A obtains (key, key_ID); SAE_B retrieves the SAME key using key_ID.
 """

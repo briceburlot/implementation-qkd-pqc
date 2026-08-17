@@ -1,15 +1,18 @@
 """
 KME (Key Management Entity) — ETSI GS QKD 014 REST API server.
+API gestionnaire des clés.
+Elle pourra par la suite appeler le programme permettant la PQC
 
-Exposes the three standard endpoints used by a SAE:
+Elle expose les trois endpoints standard necessaire a la SAE :
   GET  /api/v1/keys/{slave_SAE_ID}/status
   POST /api/v1/keys/{slave_SAE_ID}/enc_keys   (master SAE -> get key + key_ID)
   POST /api/v1/keys/{master_SAE_ID}/dec_keys  (slave  SAE -> get key by key_ID)
 
-The two KMEs (side A and side B) share the same quantum-distributed key
-material. Here that shared material is simulated by a common key store so
-that a key requested by SAE A (key + key_ID) can be retrieved by SAE B
-using only the key_ID — exactly the flow drawn on the whiteboard.
+Principes :
+Les 2 KME (A et B) partage la meme clé quantique distribuée.
+Ici les informations de cette clée partagée est simulé par un store commun
+pour que cette requete de clé par le SAE A (key + key_ID) puisse etre récupérer par
+le SAE B en utilisant uniquement le key_ID comme affiché par la démo cf. sae_API.
 """
 
 import base64
@@ -30,7 +33,7 @@ class SharedKeyStore:
     """
 
     def __init__(self):
-        self._keys = {}          # key_ID -> base64 key
+        self._keys = {}  # key_ID -> base64 key
         self._lock = threading.Lock()
 
     def new_key(self, size_bits=256):
@@ -47,8 +50,8 @@ class SharedKeyStore:
 
 
 class KMEHandler(BaseHTTPRequestHandler):
-    store = None          # injected before serving
-    default_size = 256
+    store = None # injected before serving
+    default_size = 256 # taille attendue de l'information
 
     # -- helpers ------------------------------------------------------------
     def _send_json(self, code, payload):
