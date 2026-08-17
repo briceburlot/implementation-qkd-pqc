@@ -134,7 +134,9 @@ def make_server(host, port, store):
 
 
 if __name__ == "__main__":
+    host = os.environ.get("KME_HOST", "0.0.0.0")
+    port = int(os.environ.get("KME_PORT", "8000"))
     shared = SharedKeyStore()
-    srv = make_server("127.0.0.1", 8000, shared)
-    print("KME serving on http://127.0.0.1:8000")
+    srv = make_server(host, port, shared)
+    print(f"KME serving on http://{host}:{port}")
     srv.serve_forever()

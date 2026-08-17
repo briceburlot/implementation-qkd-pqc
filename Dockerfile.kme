@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY KME.py .
+
+ENV KME_HOST=0.0.0.0
+ENV KME_PORT=8000
+
+EXPOSE 8000
+
+CMD ["python", "KME.py"]

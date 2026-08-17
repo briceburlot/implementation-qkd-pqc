@@ -15,6 +15,7 @@ Ce programme ajoute un systeme de suivi pour demo :
 """
 
 import json
+import os
 import urllib.request
 
 
@@ -56,7 +57,7 @@ class SAEClient:
 def demo():
     import threading
     import time
-    from kme_server import SharedKeyStore, make_server
+    from KME import SharedKeyStore, make_server
 
     # Single shared key store => simulates the QKD-linked pair KME_A / KME_B
     shared = SharedKeyStore()
@@ -87,5 +88,30 @@ def demo():
     server.shutdown()
 
 
+def main():
+    """Container mode: talk to a KME reachable at KME_URL (e.g. another container)."""
+    kme_url = os.environ["KME_URL"]
+    sae_id = os.environ.get("SAE_ID", "SAE_A")
+    peer_sae_id = os.environ.get("PEER_SAE_ID", "SAE_B")
+    role = os.environ.get("SAE_ROLE", "master")
+
+    client = SAEClient(sae_id, kme_url)
+    print(f"== {sae_id} ({role}) status vs {peer_sae_id} ==")
+    print(client.get_status(peer_sae_id))
+
+    if role == "master":
+        enc = client.get_enc_key(peer_sae_id, number=1, size=256)[0]
+        print("key_ID :", enc["key_ID"])
+        print("key    :", enc["key"])
+    else:
+        key_id = os.environ["KEY_ID"]
+        key = client.get_dec_key(peer_sae_id, [key_id])[0]["key"]
+        print("key_ID :", key_id)
+        print("key    :", key)
+
+
 if __name__ == "__main__":
-    demo()
+    if "KME_URL" in os.environ:
+        main()
+    else:
+        demo()
