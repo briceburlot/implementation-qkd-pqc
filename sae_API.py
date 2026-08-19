@@ -94,6 +94,7 @@ def main():
     sae_id = os.environ.get("SAE_ID", "SAE_A")
     peer_sae_id = os.environ.get("PEER_SAE_ID", "SAE_B")
     role = os.environ.get("SAE_ROLE", "master")
+    key_id_file = os.environ.get("KEY_ID_FILE")  # optional: exchange key_ID via shared volume
 
     client = SAEClient(sae_id, kme_url)
     print(f"== {sae_id} ({role}) status vs {peer_sae_id} ==")
@@ -103,8 +104,14 @@ def main():
         enc = client.get_enc_key(peer_sae_id, number=1, size=256)[0]
         print("key_ID :", enc["key_ID"])
         print("key    :", enc["key"])
+        if key_id_file:
+            with open(key_id_file, "w") as f:
+                f.write(enc["key_ID"])
     else:
-        key_id = os.environ["KEY_ID"]
+        key_id = os.environ.get("KEY_ID")
+        if not key_id and key_id_file:
+            with open(key_id_file) as f:
+                key_id = f.read().strip()
         key = client.get_dec_key(peer_sae_id, [key_id])[0]["key"]
         print("key_ID :", key_id)
         print("key    :", key)

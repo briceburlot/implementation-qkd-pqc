@@ -1,0 +1,49 @@
+services:
+  kme:
+    build:
+      context: .
+      dockerfile: Dockerfile.kme
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_B/status', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  sae_a:
+    build:
+      context: .
+      dockerfile: Dockerfile.sae
+    depends_on:
+      kme:
+        condition: service_healthy
+    environment:
+      KME_URL: http://kme:8000
+      SAE_ID: SAE_A
+      PEER_SAE_ID: SAE_B
+      SAE_ROLE: master
+      KEY_ID_FILE: /shared/key_id.txt
+    volumes:
+      - shared-data:/shared
+
+  sae_b:
+    build:
+      context: .
+      dockerfile: Dockerfile.sae
+    depends_on:
+      kme:
+        condition: service_healthy
+      sae_a:
+        condition: service_completed_successfully
+    environment:
+      KME_URL: http://kme:8000
+      SAE_ID: SAE_B
+      PEER_SAE_ID: SAE_A
+      SAE_ROLE: slave
+      KEY_ID_FILE: /shared/key_id.txt
+    volumes:
+      - shared-data:/shared
+
+volumes:
+  shared-data:
