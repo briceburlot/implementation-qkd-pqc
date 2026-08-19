@@ -1,49 +1,81 @@
 services:
-  kme:
+  kme-a:
     build:
       context: .
       dockerfile: Dockerfile.kme
     ports:
-      - "8000:8000"
+      - "8001:8000"
+    environment:
+      KME_ID: KME_A
+      KME_PEERS: '{"SAE_B": "http://kme-b:8000", "SAE_C": "http://kme-c:8000"}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_A/status', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  kme-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.kme
+    ports:
+      - "8002:8000"
+    environment:
+      KME_ID: KME_B
+      KME_PEERS: '{"SAE_A": "http://kme-a:8000", "SAE_C": "http://kme-c:8000"}'
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_B/status', timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
 
-  sae_a:
+  kme-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.kme
+    ports:
+      - "8003:8000"
+    environment:
+      KME_ID: KME_C
+      KME_PEERS: '{"SAE_A": "http://kme-a:8000", "SAE_B": "http://kme-b:8000"}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_C/status', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  sae-a:
     build:
       context: .
       dockerfile: Dockerfile.sae
     depends_on:
-      kme:
+      kme-a:
         condition: service_healthy
     environment:
-      KME_URL: http://kme:8000
+      KME_URL: http://kme-a:8000
       SAE_ID: SAE_A
-      PEER_SAE_ID: SAE_B
-      SAE_ROLE: master
-      KEY_ID_FILE: /shared/key_id.txt
-    volumes:
-      - shared-data:/shared
+    command: ["sleep", "infinity"]
 
-  sae_b:
+  sae-b:
     build:
       context: .
       dockerfile: Dockerfile.sae
     depends_on:
-      kme:
+      kme-b:
         condition: service_healthy
-      sae_a:
-        condition: service_completed_successfully
     environment:
-      KME_URL: http://kme:8000
+      KME_URL: http://kme-b:8000
       SAE_ID: SAE_B
-      PEER_SAE_ID: SAE_A
-      SAE_ROLE: slave
-      KEY_ID_FILE: /shared/key_id.txt
-    volumes:
-      - shared-data:/shared
+    command: ["sleep", "infinity"]
 
-volumes:
-  shared-data:
+  sae-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.sae
+    depends_on:
+      kme-c:
+        condition: service_healthy
+    environment:
+      KME_URL: http://kme-c:8000
+      SAE_ID: SAE_C
+    command: ["sleep", "infinity"]
