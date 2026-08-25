@@ -4,6 +4,7 @@ FROM python:3.12-slim
 
 # --- Dépendances système : build de liboqs + outils WireGuard ---------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libc6-dev \
         git cmake ninja-build gcc libssl-dev \
         wireguard-tools iproute2 iptables \
     && rm -rf /var/lib/apt/lists/*
