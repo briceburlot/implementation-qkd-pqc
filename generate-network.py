@@ -71,16 +71,24 @@ def build_compose(sites):
             "    build:",
             "      context: .",
             "      dockerfile: Dockerfile.sae",
+            # NET_ADMIN : requis pour monter l'interface WireGuard (point 4).
+            "    cap_add:",
+            "      - NET_ADMIN",
             "    depends_on:",
             f"      kme-{site}:",
             "        condition: service_healthy",
             "    environment:",
             f"      KME_URL: http://kme-{site}:8000",
             f"      SAE_ID: {sae_id}",
+            # canal classique partagé (key_ID, clés publiques PQC/WG, ciphertext)
+            "      CHANNEL_DIR: /shared/chan",
+            "    volumes:",
+            "      - shared-data:/shared",
             "    command: [\"sleep\", \"infinity\"]",
             "",
         ]
 
+    lines += ["volumes:", "  shared-data:", ""]
     return "\n".join(lines).rstrip() + "\n"
 
 

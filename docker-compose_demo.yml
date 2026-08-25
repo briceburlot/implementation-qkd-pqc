@@ -1,0 +1,69 @@
+# Démo hybride à 2 sites (Figure 2 ETSI + 4 points de img_scheme).
+# SAE_A (maître) et SAE_B (esclave) :
+#   1) clé QKD via leurs KME       2) PQC ML-KEM-768 + notif key_ID
+#   3) clé = PQC XOR QKD           4) tunnel WireGuard (PSK = clé hybride)
+# Le canal classique (key_ID, clés publiques PQC/WG, ciphertext) passe par le
+# volume partagé `chan`. Le PSK n'y transite jamais.
+services:
+  kme-a:
+    build: {context: ., dockerfile: Dockerfile.kme}
+    ports: ["8001:8000"]
+    environment:
+      KME_ID: KME_A
+      KME_PEERS: '{"SAE_B": "http://kme-b:8000"}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_B/status', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  kme-b:
+    build: {context: ., dockerfile: Dockerfile.kme}
+    ports: ["8002:8000"]
+    environment:
+      KME_ID: KME_B
+      KME_PEERS: '{"SAE_A": "http://kme-a:8000"}'
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_A/status', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  sae-a:
+    build: {context: ., dockerfile: Dockerfile.sae}
+    cap_add: ["NET_ADMIN"]                 # requis pour créer l'interface wg0
+    depends_on:
+      kme-a: {condition: service_healthy}
+    environment:
+      KME_URL: http://kme-a:8000
+      SAE_ID: SAE_A
+      PEER_SAE_ID: SAE_B
+      SAE_ROLE: master
+      HYBRID: "1"
+      CHANNEL_DIR: /shared/chan
+      WG_LOCAL_IP: 10.9.0.1/24
+      WG_LISTEN_PORT: "51820"
+      WG_PEER_ENDPOINT: sae-b:51820
+      WG_PEER_ALLOWED_IPS: 10.9.0.2/32
+    volumes: ["shared-data:/shared"]
+
+  sae-b:
+    build: {context: ., dockerfile: Dockerfile.sae}
+    cap_add: ["NET_ADMIN"]
+    depends_on:
+      kme-b: {condition: service_healthy}
+    environment:
+      KME_URL: http://kme-b:8000
+      SAE_ID: SAE_B
+      PEER_SAE_ID: SAE_A
+      SAE_ROLE: slave
+      HYBRID: "1"
+      CHANNEL_DIR: /shared/chan
+      WG_LOCAL_IP: 10.9.0.2/24
+      WG_LISTEN_PORT: "51820"
+      WG_PEER_ENDPOINT: sae-a:51820
+      WG_PEER_ALLOWED_IPS: 10.9.0.1/32
+    volumes: ["shared-data:/shared"]
+
+volumes:
+  shared-data:

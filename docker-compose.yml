@@ -48,34 +48,52 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.sae
+    cap_add:
+      - NET_ADMIN
     depends_on:
       kme-a:
         condition: service_healthy
     environment:
       KME_URL: http://kme-a:8000
       SAE_ID: SAE_A
+      CHANNEL_DIR: /shared/chan
+    volumes:
+      - shared-data:/shared
     command: ["sleep", "infinity"]
 
   sae-b:
     build:
       context: .
       dockerfile: Dockerfile.sae
+    cap_add:
+      - NET_ADMIN
     depends_on:
       kme-b:
         condition: service_healthy
     environment:
       KME_URL: http://kme-b:8000
       SAE_ID: SAE_B
+      CHANNEL_DIR: /shared/chan
+    volumes:
+      - shared-data:/shared
     command: ["sleep", "infinity"]
 
   sae-c:
     build:
       context: .
       dockerfile: Dockerfile.sae
+    cap_add:
+      - NET_ADMIN
     depends_on:
       kme-c:
         condition: service_healthy
     environment:
       KME_URL: http://kme-c:8000
       SAE_ID: SAE_C
+      CHANNEL_DIR: /shared/chan
+    volumes:
+      - shared-data:/shared
     command: ["sleep", "infinity"]
+
+volumes:
+  shared-data:

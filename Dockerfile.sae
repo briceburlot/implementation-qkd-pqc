@@ -1,6 +1,28 @@
+# SAE (Secure Application Entity) — orchestre les 4 points du schéma img_scheme.
+# Nécessite : liboqs (PQC ML-KEM-768) + wireguard-tools/iproute2 (tunnel PSK).
 FROM python:3.12-slim
 
+# --- Dépendances système : build de liboqs + outils WireGuard ---------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build gcc libssl-dev \
+        wireguard-tools iproute2 iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- liboqs (bibliothèque native, shared) -----------------------------------
+# Compilée au build pour une image reproductible (évite l'auto-build runtime).
+RUN git clone --depth=1 https://github.com/open-quantum-safe/liboqs /tmp/liboqs \
+    && cmake -S /tmp/liboqs -B /tmp/liboqs/build \
+        -GNinja -DBUILD_SHARED_LIBS=ON \
+        -DOQS_MINIMAL_BUILD="KEM_ml_kem_768" \
+    && cmake --build /tmp/liboqs/build --parallel "$(nproc)" \
+    && cmake --build /tmp/liboqs/build --target install \
+    && rm -rf /tmp/liboqs
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
+
+# --- Wrapper Python liboqs --------------------------------------------------
+RUN pip install --no-cache-dir liboqs-python
+
 WORKDIR /app
-COPY sae_API.py KME.py ./
+COPY KME.py sae_API.py crypto_hybrid.py wireguard.py ./
 
 CMD ["python", "sae_API.py"]
