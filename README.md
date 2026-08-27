@@ -49,6 +49,53 @@ transmis : il est recalculé à l'identique des deux côtés.
 canaux tient (QKD couvre une éventuelle chute de ML-KEM ; PQC couvre une
 compromission du lien/store QKD).
 
+## Authentification
+
+Deux liens sont authentifiés, pour toutes les réplications de site (2 sites
+comme N sites) :
+
+| Lien              | Mécanisme                                   | Dépendance PQC |
+|--------------------|----------------------------------------------|:--------------:|
+| **SAE ↔ KME**      | mTLS classique (CA EC P-256, `cryptography`) | **aucune**     |
+| **SAE ↔ SAE**      | signature **ML-DSA-65** (CRYSTALS-Dilithium, FIPS 204) sur chaque message du canal classique | oui (identité) |
+| KME ↔ KME (interne)| inchangé, HTTP en clair — hors périmètre     | aucune         |
+
+- **SAE ↔ KME** : le KME expose deux ports — un port **externe** (`KME_PORT`,
+  8000) réservé aux SAE, en TLS mutuel (`ssl.CERT_REQUIRED`) : un SAE sans
+  certificat client valide (signé par la CA du réseau) ne peut tout
+  simplement pas établir la connexion. C'est **volontairement 100%
+  classique** (EC P-256, aucune dépendance à liboqs côté KME) — c'est
+  précisément le lien qui ne doit PAS reposer sur du PQC. Un port **interne**
+  distinct (`KME_INTERNAL_PORT`, 8001) reste en HTTP simple pour la
+  réplication KME↔KME (`ForwardingModule`), inchangé.
+- **SAE ↔ SAE** : chaque message du canal classique (notification du
+  `key_ID`, clé publique PQC, ciphertext, clés publiques WireGuard) est signé
+  **ML-DSA-65** par l'émetteur (`sae_API.AuthenticatedChannel.put_signed`) et
+  vérifié par le destinataire (`get_verified`) contre le certificat d'identité
+  du pair (`pqc_cert.py`), lui-même signé par une CA ML-DSA locale au réseau
+  simulé. Sans cette signature, un tiers ayant accès au volume partagé
+  pourrait substituer sa propre clé publique PQC (MITM) ; avec elle, toute
+  substitution est détectée et rejette l'établissement de la clé hybride.
+
+### PKI (`pki_setup.py`)
+
+Un service `pki-init` (basé sur l'image SAE, qui embarque déjà liboqs +
+`cryptography`) génère, une seule fois, dans `./certs/` (monté sur l'hôte) :
+
+```
+certs/tls/ca.crt, ca.key            # CA classique EC P-256 (mTLS SAE<->KME)
+certs/tls/kme_<site>.crt/.key       # identité serveur de chaque KME
+certs/tls/sae_<site>.crt/.key       # identité client de chaque SAE
+certs/pqc/ca_pub.key, ca_priv.key   # CA ML-DSA-65 (SAE<->SAE)
+certs/pqc/public/sae_<site>.cert.json   # certificat ML-DSA public par SAE
+certs/pqc/private/sae_<site>.key        # clé privée ML-DSA par SAE
+```
+
+Idempotent : relancer `pki-init` (ex. après avoir ajouté un site) ne
+régénère pas les CA/certs déjà présents. Tous les `docker compose up`
+ci-dessous démarrent automatiquement `pki-init` avant les KME/SAE
+(`depends_on: condition: service_completed_successfully`).
+
 ## Prérequis
 
 - Docker + Docker Compose. Les SAE ont besoin de la capacité **NET_ADMIN**

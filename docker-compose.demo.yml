@@ -1,15 +1,36 @@
+# Démo ETSI GS QKD 014 "simple" à 2 sites (sans HYBRID : pas de PQC/WireGuard,
+# juste le flux enc_keys/dec_keys). Authentification SAE<->KME par mTLS
+# classique (CA EC P-256, `./certs/tls`) — aucune dépendance PQC sur ce lien.
+# `pki-init` génère la PKI une fois, avant tout le reste.
 services:
+  pki-init:
+    build: {context: ., dockerfile: Dockerfile.sae}
+    entrypoint: ["python", "pki_setup.py"]
+    command: ["A", "B"]
+    volumes: ["./certs:/certs"]
+
   kme-a:
     build:
       context: .
       dockerfile: Dockerfile.kme
     ports:
       - "8001:8000"
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
     environment:
       KME_ID: KME_A
-      KME_PEERS: '{"SAE_B": "http://kme-b:8000"}'
+      KME_PEERS: '{"SAE_B": "http://kme-b:8001"}'
+      KME_INTERNAL_PORT: "8001"
+      TLS_SERVER_CERT: /certs/server.crt
+      TLS_SERVER_KEY: /certs/server.key
+      TLS_CA_CERT: /certs/ca.crt
+    volumes:
+      - ./certs/tls/kme_a.crt:/certs/server.crt:ro
+      - ./certs/tls/kme_a.key:/certs/server.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_B/status', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -20,11 +41,22 @@ services:
       dockerfile: Dockerfile.kme
     ports:
       - "8002:8000"
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
     environment:
       KME_ID: KME_B
-      KME_PEERS: '{"SAE_A": "http://kme-a:8000"}'
+      KME_PEERS: '{"SAE_A": "http://kme-a:8001"}'
+      KME_INTERNAL_PORT: "8001"
+      TLS_SERVER_CERT: /certs/server.crt
+      TLS_SERVER_KEY: /certs/server.key
+      TLS_CA_CERT: /certs/ca.crt
+    volumes:
+      - ./certs/tls/kme_b.crt:/certs/server.crt:ro
+      - ./certs/tls/kme_b.key:/certs/server.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_A/status', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -34,34 +66,50 @@ services:
       context: .
       dockerfile: Dockerfile.sae
     depends_on:
+      pki-init:
+        condition: service_completed_successfully
       kme-a:
         condition: service_healthy
     environment:
-      KME_URL: http://kme-a:8000
+      KME_URL: https://kme-a:8000
       SAE_ID: SAE_A
       PEER_SAE_ID: SAE_B
       SAE_ROLE: master
       KEY_ID_FILE: /shared/key_id.txt
+      TLS_CLIENT_CERT: /certs/client.crt
+      TLS_CLIENT_KEY: /certs/client.key
+      TLS_CA_CERT: /certs/ca.crt
     volumes:
       - shared-data:/shared
+      - ./certs/tls/sae_a.crt:/certs/client.crt:ro
+      - ./certs/tls/sae_a.key:/certs/client.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
 
   sae-b:
     build:
       context: .
       dockerfile: Dockerfile.sae
     depends_on:
+      pki-init:
+        condition: service_completed_successfully
       kme-b:
         condition: service_healthy
       sae-a:
         condition: service_completed_successfully
     environment:
-      KME_URL: http://kme-b:8000
+      KME_URL: https://kme-b:8000
       SAE_ID: SAE_B
       PEER_SAE_ID: SAE_A
       SAE_ROLE: slave
       KEY_ID_FILE: /shared/key_id.txt
+      TLS_CLIENT_CERT: /certs/client.crt
+      TLS_CLIENT_KEY: /certs/client.key
+      TLS_CA_CERT: /certs/ca.crt
     volumes:
       - shared-data:/shared
+      - ./certs/tls/sae_b.crt:/certs/client.crt:ro
+      - ./certs/tls/sae_b.key:/certs/client.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
 
 volumes:
   shared-data:

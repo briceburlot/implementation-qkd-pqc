@@ -11,19 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # --- liboqs (bibliothèque native, shared) -----------------------------------
 # Compilée au build pour une image reproductible (évite l'auto-build runtime).
+# KEM_ml_kem_768  : point 2 du schéma (échange de clé PQC SAE<->SAE)
+# SIG_ml_dsa_65   : authentification du canal classique SAE<->SAE
+#                   (certificats d'identité ML-DSA-65 / CRYSTALS-Dilithium)
 RUN git clone --depth=1 https://github.com/open-quantum-safe/liboqs /tmp/liboqs \
     && cmake -S /tmp/liboqs -B /tmp/liboqs/build \
         -GNinja -DBUILD_SHARED_LIBS=ON \
-        -DOQS_MINIMAL_BUILD="KEM_ml_kem_768" \
+        -DOQS_MINIMAL_BUILD="KEM_ml_kem_768;SIG_ml_dsa_65" \
     && cmake --build /tmp/liboqs/build --parallel "$(nproc)" \
     && cmake --build /tmp/liboqs/build --target install \
     && rm -rf /tmp/liboqs
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
 
-# --- Wrapper Python liboqs --------------------------------------------------
-RUN pip install --no-cache-dir liboqs-python
+# --- Wrapper Python liboqs + PKI classique (mTLS SAE<->KME, sans PQC) -------
+RUN pip install --no-cache-dir liboqs-python cryptography
+
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY KME.py sae_API.py crypto_hybrid.py wireguard.py ./
+COPY KME.py sae_API.py crypto_hybrid.py wireguard.py pqc_cert.py pki_setup.py ./
 
 CMD ["python", "sae_API.py"]

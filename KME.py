@@ -40,12 +40,22 @@ Endpoint interne (lien QKD, hors API ETSI) :
 
 NB : la couche cryptographique hybride (PQC ⊕ QKD, WireGuard) vit côté SAE
 (crypto_hybrid.py + wireguard.py). Le KME reste, comme le veut l'ETSI, un pur
-fournisseur de clés symétriques identiques de part et d'autre.
+fournisseur de clés symétriques identiques de part et d'autre — et n'a donc
+JAMAIS de dépendance PQC.
+
+Authentification (deux serveurs distincts, un seul process) :
+  - port externe (KME_PORT, défaut 8000), face aux SAE : **mTLS classique**
+    (TLS_SERVER_CERT/KEY + TLS_CA_CERT), certificat client SAE exigé
+    (CERT_REQUIRED). Ne sert que /api/v1/keys/...
+  - port interne (KME_INTERNAL_PORT, défaut 8001), face aux KME pairs : HTTP
+    en clair, INCHANGÉ — la réplication KME<->KME reste hors périmètre de
+    cette demande d'authentification. Ne sert que /internal/sync_keys.
 """
 
 import base64
 import json
 import os
+import ssl
 import threading
 import urllib.error
 import urllib.request
@@ -274,12 +284,11 @@ class KeyManagement:
 
 
 # =========================================================================== #
-# Handler HTTP  —  traduit l'API REST vers le Key Management                   #
+# Handlers HTTP  —  traduisent l'API REST vers le Key Management               #
 # =========================================================================== #
-class KMEHandler(BaseHTTPRequestHandler):
-    key_management = None  # injecté avant de servir (instance KeyManagement)
+class _JSONHandlerMixin:
+    """Helpers communs de sérialisation JSON, partagés par les deux handlers."""
 
-    # -- helpers ------------------------------------------------------------ #
     def _send_json(self, code, payload):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
@@ -301,7 +310,12 @@ class KMEHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # silence
 
-    # -- routing ------------------------------------------------------------ #
+
+class ExternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
+    """Face SAE (port externe, mTLS) : uniquement l'API ETSI 014 (clauses 5.1-5.4)."""
+
+    key_management = None  # injecté avant de servir (instance KeyManagement)
+
     def do_GET(self):
         parts = self.path.strip("/").split("/")
         km = self.key_management
@@ -315,12 +329,6 @@ class KMEHandler(BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/")
         km = self.key_management
         body = self._read_body()
-
-        # lien QKD entrant : le Forwarding Module d'un pair pousse des clés
-        if len(parts) == 2 and parts == ["internal", "sync_keys"]:
-            km.ingest_from_peer(body.get("keys", []))
-            self._send_json(200, {"status": "ok"})
-            return
 
         if not (len(parts) == 5 and parts[:3] == ["api", "v1", "keys"]):
             self._send_json(404, {"message": "Not found"})
@@ -356,17 +364,56 @@ class KMEHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"message": "Not found"})
 
 
+class InternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
+    """Face KME pair (port interne, HTTP en clair) : uniquement le lien QKD
+    interne. Volontairement non authentifié — hors périmètre de cette
+    demande, comportement inchangé."""
+
+    key_management = None  # injecté avant de servir (instance KeyManagement)
+
+    def do_POST(self):
+        parts = self.path.strip("/").split("/")
+        km = self.key_management
+        body = self._read_body()
+
+        if len(parts) == 2 and parts == ["internal", "sync_keys"]:
+            km.ingest_from_peer(body.get("keys", []))
+            self._send_json(200, {"status": "ok"})
+        else:
+            self._send_json(404, {"message": "Not found"})
+
+
+# rétro-compatibilité : ancien nom, utilisé nulle part ailleurs mais conservé
+# au cas où du code externe importerait KMEHandler directement.
+KMEHandler = ExternalKMEHandler
+
+
 # =========================================================================== #
-# Assemblage de la QKD Node + serveur                                          #
+# Assemblage de la QKD Node + serveur(s)                                      #
 # =========================================================================== #
+def _build_tls_context(tls):
+    """Construit le SSLContext serveur mTLS à partir d'un dict
+    {cert, key, ca_cert} de chemins de fichiers. `verify_mode` = CERT_REQUIRED :
+    le client (SAE) DOIT présenter un certificat signé par la même CA."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=tls["cert"], keyfile=tls["key"])
+    ctx.load_verify_locations(cafile=tls["ca_cert"])
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return ctx
+
+
 def make_server(host, port, store=None, kme_id="KME", peers=None,
-                key_management=None):
-    """Construit le serveur HTTP de la QKD Node.
+                key_management=None, tls=None):
+    """Construit le serveur HTTP externe (face SAE) de la QKD Node.
 
     Deux modes d'appel :
       - moderne : passer `key_management` (instance KeyManagement) ;
       - hérité  : passer `store` (SharedKeyStore) — utilisé par sae_API.demo().
         Dans ce cas on enveloppe le store dans une QKD Node minimale.
+
+    `tls` : dict optionnel {cert, key, ca_cert}. Si fourni, le serveur exige
+    du mTLS (CERT_REQUIRED) ; si None (démo en mémoire hors Docker), le
+    serveur reste en HTTP simple, comme avant.
     """
     if key_management is None:
         qkd = QKDControl(peers or {})
@@ -375,7 +422,19 @@ def make_server(host, port, store=None, kme_id="KME", peers=None,
             qkd._stores["__local__"] = store
         key_management = KeyManagement(kme_id, qkd)
 
-    handler = type("BoundKMEHandler", (KMEHandler,), {
+    handler = type("BoundExternalKMEHandler", (ExternalKMEHandler,), {
+        "key_management": key_management,
+    })
+    srv = ThreadingHTTPServer((host, port), handler)
+    if tls:
+        srv.socket = _build_tls_context(tls).wrap_socket(srv.socket, server_side=True)
+    return srv
+
+
+def make_internal_server(host, port, key_management):
+    """Construit le serveur HTTP interne (face KME pairs) : HTTP en clair,
+    inchangé, hors périmètre de cette demande d'authentification."""
+    handler = type("BoundInternalKMEHandler", (InternalKMEHandler,), {
         "key_management": key_management,
     })
     return ThreadingHTTPServer((host, port), handler)
@@ -384,11 +443,27 @@ def make_server(host, port, store=None, kme_id="KME", peers=None,
 if __name__ == "__main__":
     host = os.environ.get("KME_HOST", "0.0.0.0")
     port = int(os.environ.get("KME_PORT", "8000"))
+    internal_port = int(os.environ.get("KME_INTERNAL_PORT", "8001"))
     kme_id = os.environ.get("KME_ID", "KME")
     peers = json.loads(os.environ.get("KME_PEERS", "{}"))
 
+    tls = None
+    if os.environ.get("TLS_SERVER_CERT"):
+        tls = {
+            "cert": os.environ["TLS_SERVER_CERT"],
+            "key": os.environ["TLS_SERVER_KEY"],
+            "ca_cert": os.environ["TLS_CA_CERT"],
+        }
+
     qkd_control = QKDControl(peers)
     key_mgmt = KeyManagement(kme_id, qkd_control)
-    srv = make_server(host, port, kme_id=kme_id, key_management=key_mgmt)
-    print(f"QKD Node {kme_id} serving on http://{host}:{port} (peers: {peers})")
-    srv.serve_forever()
+
+    external_srv = make_server(host, port, kme_id=kme_id, key_management=key_mgmt, tls=tls)
+    internal_srv = make_internal_server(host, internal_port, key_mgmt)
+
+    scheme = "https (mTLS)" if tls else "http"
+    print(f"QKD Node {kme_id} : {scheme}://{host}:{port} (SAE, ETSI 014) "
+          f"+ http://{host}:{internal_port} (KME peers: {peers})")
+
+    threading.Thread(target=internal_srv.serve_forever, daemon=True).start()
+    external_srv.serve_forever()

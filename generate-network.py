@@ -20,9 +20,17 @@ import argparse
 import json
 import sys
 
+# Le KME expose deux ports : externe (mTLS, face SAE, ETSI 014) et interne
+# (HTTP en clair, face KME pairs, réplication — hors périmètre auth).
+KME_EXTERNAL_PORT = 8000
+KME_INTERNAL_PORT = 8001
+
+# Le check HTTP d'origine échouerait la poignée de main TLS (il ne présente
+# pas de certificat client) : on vérifie juste que le port externe accepte
+# des connexions.
 HEALTHCHECK_TEMPLATE = (
-    "import urllib.request; "
-    "urllib.request.urlopen('http://localhost:8000/api/v1/keys/{sae_id}/status', timeout=2)"
+    "import socket; "
+    "socket.create_connection(('localhost', {port}), timeout=2)"
 )
 
 
@@ -35,12 +43,25 @@ def build_compose(sites):
 
     lines = ["services:"]
 
+    # --- pki-init : génère la PKI classique (mTLS) + ML-DSA (SAE<->SAE) -----
+    # une fois pour tout le réseau, dans ./certs (monté sur l'hôte).
+    lines += [
+        "  pki-init:",
+        "    build:",
+        "      context: .",
+        "      dockerfile: Dockerfile.sae",
+        "    entrypoint: [\"python\", \"pki_setup.py\"]",
+        f"    command: [{', '.join(json.dumps(l) for l in labels)}]",
+        "    volumes:",
+        "      - ./certs:/certs",
+        "",
+    ]
+
     for i, label in enumerate(labels):
         site = label.lower()
         kme_service = f"kme-{site}"
-        sae_id = f"SAE_{label}"
         peers = {
-            f"SAE_{other}": f"http://kme-{other.lower()}:8000"
+            f"SAE_{other}": f"http://kme-{other.lower()}:{KME_INTERNAL_PORT}"
             for other in labels if other != label
         }
         host_port = 8001 + i
@@ -51,12 +72,23 @@ def build_compose(sites):
             "      context: .",
             "      dockerfile: Dockerfile.kme",
             "    ports:",
-            f'      - "{host_port}:8000"',
+            f'      - "{host_port}:{KME_EXTERNAL_PORT}"',
+            "    depends_on:",
+            "      pki-init:",
+            "        condition: service_completed_successfully",
             "    environment:",
             f"      KME_ID: KME_{label}",
             f"      KME_PEERS: '{json.dumps(peers)}'",
+            f"      KME_INTERNAL_PORT: \"{KME_INTERNAL_PORT}\"",
+            "      TLS_SERVER_CERT: /certs/server.crt",
+            "      TLS_SERVER_KEY: /certs/server.key",
+            "      TLS_CA_CERT: /certs/ca.crt",
+            "    volumes:",
+            f"      - ./certs/tls/kme_{site}.crt:/certs/server.crt:ro",
+            f"      - ./certs/tls/kme_{site}.key:/certs/server.key:ro",
+            "      - ./certs/tls/ca.crt:/certs/ca.crt:ro",
             "    healthcheck:",
-            f'      test: ["CMD", "python", "-c", "{HEALTHCHECK_TEMPLATE.format(sae_id=sae_id)}"]',
+            f'      test: ["CMD", "python", "-c", "{HEALTHCHECK_TEMPLATE.format(port=KME_EXTERNAL_PORT)}"]',
             "      interval: 3s",
             "      timeout: 2s",
             "      retries: 10",
@@ -75,15 +107,32 @@ def build_compose(sites):
             "    cap_add:",
             "      - NET_ADMIN",
             "    depends_on:",
+            "      pki-init:",
+            "        condition: service_completed_successfully",
             f"      kme-{site}:",
             "        condition: service_healthy",
             "    environment:",
-            f"      KME_URL: http://kme-{site}:8000",
+            f"      KME_URL: https://kme-{site}:{KME_EXTERNAL_PORT}",
             f"      SAE_ID: {sae_id}",
             # canal classique partagé (key_ID, clés publiques PQC/WG, ciphertext)
             "      CHANNEL_DIR: /shared/chan",
+            # mTLS SAE<->KME (classique, aucune dépendance PQC)
+            "      TLS_CLIENT_CERT: /certs/client.crt",
+            "      TLS_CLIENT_KEY: /certs/client.key",
+            "      TLS_CA_CERT: /certs/ca.crt",
+            # ML-DSA-65 SAE<->SAE (authentifie le canal classique)
+            "      PQC_CA_PUB: /certs/pqc_ca.pub",
+            "      PQC_CERT_DIR: /certs/pqc_public",
+            f"      PQC_CERT: /certs/pqc_public/sae_{site}.cert.json",
+            "      PQC_PRIV_KEY: /certs/pqc_priv.key",
             "    volumes:",
             "      - shared-data:/shared",
+            f"      - ./certs/tls/sae_{site}.crt:/certs/client.crt:ro",
+            f"      - ./certs/tls/sae_{site}.key:/certs/client.key:ro",
+            "      - ./certs/tls/ca.crt:/certs/ca.crt:ro",
+            "      - ./certs/pqc/ca_pub.key:/certs/pqc_ca.pub:ro",
+            "      - ./certs/pqc/public:/certs/pqc_public:ro",
+            f"      - ./certs/pqc/private/sae_{site}.key:/certs/pqc_priv.key:ro",
             "    command: [\"sleep\", \"infinity\"]",
             "",
         ]

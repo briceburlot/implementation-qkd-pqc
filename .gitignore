@@ -1,2 +1,6 @@
 /__pycache__
 *.pyc
+
+# PKI générée par pki_setup.py (clés privées classiques + ML-DSA) : jamais
+# committée, régénérée localement par le service compose `pki-init`.
+/certs/

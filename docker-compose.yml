@@ -1,15 +1,35 @@
 services:
+  pki-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.sae
+    entrypoint: ["python", "pki_setup.py"]
+    command: ["A", "B", "C"]
+    volumes:
+      - ./certs:/certs
+
   kme-a:
     build:
       context: .
       dockerfile: Dockerfile.kme
     ports:
       - "8001:8000"
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
     environment:
       KME_ID: KME_A
-      KME_PEERS: '{"SAE_B": "http://kme-b:8000", "SAE_C": "http://kme-c:8000"}'
+      KME_PEERS: '{"SAE_B": "http://kme-b:8001", "SAE_C": "http://kme-c:8001"}'
+      KME_INTERNAL_PORT: "8001"
+      TLS_SERVER_CERT: /certs/server.crt
+      TLS_SERVER_KEY: /certs/server.key
+      TLS_CA_CERT: /certs/ca.crt
+    volumes:
+      - ./certs/tls/kme_a.crt:/certs/server.crt:ro
+      - ./certs/tls/kme_a.key:/certs/server.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_A/status', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -20,11 +40,22 @@ services:
       dockerfile: Dockerfile.kme
     ports:
       - "8002:8000"
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
     environment:
       KME_ID: KME_B
-      KME_PEERS: '{"SAE_A": "http://kme-a:8000", "SAE_C": "http://kme-c:8000"}'
+      KME_PEERS: '{"SAE_A": "http://kme-a:8001", "SAE_C": "http://kme-c:8001"}'
+      KME_INTERNAL_PORT: "8001"
+      TLS_SERVER_CERT: /certs/server.crt
+      TLS_SERVER_KEY: /certs/server.key
+      TLS_CA_CERT: /certs/ca.crt
+    volumes:
+      - ./certs/tls/kme_b.crt:/certs/server.crt:ro
+      - ./certs/tls/kme_b.key:/certs/server.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_B/status', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -35,11 +66,22 @@ services:
       dockerfile: Dockerfile.kme
     ports:
       - "8003:8000"
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
     environment:
       KME_ID: KME_C
-      KME_PEERS: '{"SAE_A": "http://kme-a:8000", "SAE_B": "http://kme-b:8000"}'
+      KME_PEERS: '{"SAE_A": "http://kme-a:8001", "SAE_B": "http://kme-b:8001"}'
+      KME_INTERNAL_PORT: "8001"
+      TLS_SERVER_CERT: /certs/server.crt
+      TLS_SERVER_KEY: /certs/server.key
+      TLS_CA_CERT: /certs/ca.crt
+    volumes:
+      - ./certs/tls/kme_c.crt:/certs/server.crt:ro
+      - ./certs/tls/kme_c.key:/certs/server.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/keys/SAE_C/status', timeout=2)"]
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=2)"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -51,14 +93,29 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
+      pki-init:
+        condition: service_completed_successfully
       kme-a:
         condition: service_healthy
     environment:
-      KME_URL: http://kme-a:8000
+      KME_URL: https://kme-a:8000
       SAE_ID: SAE_A
       CHANNEL_DIR: /shared/chan
+      TLS_CLIENT_CERT: /certs/client.crt
+      TLS_CLIENT_KEY: /certs/client.key
+      TLS_CA_CERT: /certs/ca.crt
+      PQC_CA_PUB: /certs/pqc_ca.pub
+      PQC_CERT_DIR: /certs/pqc_public
+      PQC_CERT: /certs/pqc_public/sae_a.cert.json
+      PQC_PRIV_KEY: /certs/pqc_priv.key
     volumes:
       - shared-data:/shared
+      - ./certs/tls/sae_a.crt:/certs/client.crt:ro
+      - ./certs/tls/sae_a.key:/certs/client.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
+      - ./certs/pqc/ca_pub.key:/certs/pqc_ca.pub:ro
+      - ./certs/pqc/public:/certs/pqc_public:ro
+      - ./certs/pqc/private/sae_a.key:/certs/pqc_priv.key:ro
     command: ["sleep", "infinity"]
 
   sae-b:
@@ -68,14 +125,29 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
+      pki-init:
+        condition: service_completed_successfully
       kme-b:
         condition: service_healthy
     environment:
-      KME_URL: http://kme-b:8000
+      KME_URL: https://kme-b:8000
       SAE_ID: SAE_B
       CHANNEL_DIR: /shared/chan
+      TLS_CLIENT_CERT: /certs/client.crt
+      TLS_CLIENT_KEY: /certs/client.key
+      TLS_CA_CERT: /certs/ca.crt
+      PQC_CA_PUB: /certs/pqc_ca.pub
+      PQC_CERT_DIR: /certs/pqc_public
+      PQC_CERT: /certs/pqc_public/sae_b.cert.json
+      PQC_PRIV_KEY: /certs/pqc_priv.key
     volumes:
       - shared-data:/shared
+      - ./certs/tls/sae_b.crt:/certs/client.crt:ro
+      - ./certs/tls/sae_b.key:/certs/client.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
+      - ./certs/pqc/ca_pub.key:/certs/pqc_ca.pub:ro
+      - ./certs/pqc/public:/certs/pqc_public:ro
+      - ./certs/pqc/private/sae_b.key:/certs/pqc_priv.key:ro
     command: ["sleep", "infinity"]
 
   sae-c:
@@ -85,14 +157,29 @@ services:
     cap_add:
       - NET_ADMIN
     depends_on:
+      pki-init:
+        condition: service_completed_successfully
       kme-c:
         condition: service_healthy
     environment:
-      KME_URL: http://kme-c:8000
+      KME_URL: https://kme-c:8000
       SAE_ID: SAE_C
       CHANNEL_DIR: /shared/chan
+      TLS_CLIENT_CERT: /certs/client.crt
+      TLS_CLIENT_KEY: /certs/client.key
+      TLS_CA_CERT: /certs/ca.crt
+      PQC_CA_PUB: /certs/pqc_ca.pub
+      PQC_CERT_DIR: /certs/pqc_public
+      PQC_CERT: /certs/pqc_public/sae_c.cert.json
+      PQC_PRIV_KEY: /certs/pqc_priv.key
     volumes:
       - shared-data:/shared
+      - ./certs/tls/sae_c.crt:/certs/client.crt:ro
+      - ./certs/tls/sae_c.key:/certs/client.key:ro
+      - ./certs/tls/ca.crt:/certs/ca.crt:ro
+      - ./certs/pqc/ca_pub.key:/certs/pqc_ca.pub:ro
+      - ./certs/pqc/public:/certs/pqc_public:ro
+      - ./certs/pqc/private/sae_c.key:/certs/pqc_priv.key:ro
     command: ["sleep", "infinity"]
 
 volumes:
