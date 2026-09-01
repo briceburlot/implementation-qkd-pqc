@@ -1,19 +1,19 @@
-# SAE (Secure Application Entity) — orchestre les 4 points du schéma img_scheme.
-# Nécessite : liboqs (PQC ML-KEM-768) + wireguard-tools/iproute2 (tunnel PSK).
+# SAE (Secure Application Entity) — orchestrates the 4 points of the img_scheme diagram.
+# Requires: liboqs (PQC ML-KEM-768) + wireguard-tools/iproute2 (PSK tunnel).
 FROM python:3.12-slim
 
-# --- Dépendances système : build de liboqs + outils WireGuard ---------------
+# --- System dependencies: liboqs build + WireGuard tools --------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential libc6-dev \
         git cmake ninja-build gcc libssl-dev \
         wireguard-tools iproute2 iptables \
     && rm -rf /var/lib/apt/lists/*
 
-# --- liboqs (bibliothèque native, shared) -----------------------------------
-# Compilée au build pour une image reproductible (évite l'auto-build runtime).
-# KEM_ml_kem_768  : point 2 du schéma (échange de clé PQC SAE<->SAE)
-# SIG_ml_dsa_65   : authentification du canal classique SAE<->SAE
-#                   (certificats d'identité ML-DSA-65 / CRYSTALS-Dilithium)
+# --- liboqs (native, shared library) ----------------------------------------
+# Compiled at build time for a reproducible image (avoids runtime auto-build).
+# KEM_ml_kem_768  : point 2 of the diagram (SAE<->SAE PQC key exchange)
+# SIG_ml_dsa_65   : authentication of the classic SAE<->SAE channel
+#                   (ML-DSA-65 / CRYSTALS-Dilithium identity certificates)
 RUN git clone --depth=1 https://github.com/open-quantum-safe/liboqs /tmp/liboqs \
     && cmake -S /tmp/liboqs -B /tmp/liboqs/build \
         -GNinja -DBUILD_SHARED_LIBS=ON \
@@ -23,7 +23,7 @@ RUN git clone --depth=1 https://github.com/open-quantum-safe/liboqs /tmp/liboqs 
     && rm -rf /tmp/liboqs
 ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
 
-# --- Wrapper Python liboqs + PKI classique (mTLS SAE<->KME, sans PQC) -------
+# --- Python liboqs wrapper + classical PKI (SAE<->KME mTLS, no PQC) --------
 RUN pip install --no-cache-dir liboqs-python cryptography
 
 ENV PYTHONUNBUFFERED=1

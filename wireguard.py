@@ -1,28 +1,27 @@
 """
-wireguard.py — Point 4 du schéma "img_scheme".
+Brings up a WireGuard tunnel between SAE_A and SAE_B, injecting the hybrid
+key (PQC ⊕ QKD, cf. crypto_hybrid.combine_keys) as the **PresharedKey (PSK)**.
 
-Monte un tunnel WireGuard entre SAE_A et SAE_B en injectant la clé hybride
-(PQC ⊕ QKD, cf. crypto_hybrid.combine_keys) comme **PresharedKey (PSK)**.
+Why the PSK, and not the session key?
+    WireGuard performs its own handshake (Noise protocol / Curve25519) and
+    derives its own ChaCha20-Poly1305 session keys itself: it cannot be
+    forced to use an arbitrary symmetric key as the traffic key. The only
+    injection point for an external secret is the PresharedKey field, which
+    is mixed into the Noise handshake. Result: traffic is encrypted with
+    ChaCha20-Poly1305 (as required by point 4) AND its security ALSO depends
+    on our hybrid QKD+PQC secret — an attacker must break Curve25519 *and*
+    obtain the PSK.
 
-Pourquoi le PSK, et pas la clé de session ?
-    WireGuard réalise son propre handshake (protocole Noise / Curve25519) et
-    dérive lui-même ses clés de session ChaCha20-Poly1305 : on ne peut pas lui
-    imposer une clé symétrique arbitraire comme clé de trafic. Le seul point
-    d'injection d'un secret externe est le champ PresharedKey, qui est mélangé
-    au handshake Noise. Résultat : le trafic est chiffré en ChaCha20-Poly1305
-    (comme demandé au point 4) ET sa sécurité dépend AUSSI de notre secret
-    hybride QKD+PQC — un attaquant doit casser Curve25519 *et* obtenir le PSK.
+Prerequisites (provided by the Docker image):
+    - the `wireguard-tools` package (`wg`, `wg-quick` commands);
+    - the NET_ADMIN kernel capability (cap_add in docker-compose) to create
+      the `wg0` interface and manipulate routing.
 
-Prérequis (fournis par l'image Docker) :
-    - paquet `wireguard-tools` (commandes `wg`, `wg-quick`) ;
-    - capacité noyau NET_ADMIN (cap_add dans docker-compose) pour créer
-      l'interface `wg0` et manipuler le routage.
-
-Ce module se contente de générer la configuration et d'appeler `wg`/`ip`.
-La clé statique Curve25519 de chaque SAE est générée localement ; les clés
-PUBLIQUES sont échangées via le même canal classique que le key_ID (hors
-périmètre au sens ETSI). Le PSK, lui, n'est JAMAIS transmis : il est recalculé
-de façon identique des deux côtés à partir de QKD+PQC.
+This module only generates the configuration and calls `wg`/`ip`.
+Each SAE's static Curve25519 key is generated locally; PUBLIC keys are
+exchanged over the same classic channel as the key_ID (out of scope in the
+ETSI sense). The PSK itself is NEVER transmitted: it is recomputed
+identically on both sides from QKD+PQC.
 """
 
 import ipaddress
@@ -31,27 +30,27 @@ import subprocess
 
 
 def wg_tools_available():
-    """True si les commandes WireGuard sont présentes dans le PATH."""
+    """True if the WireGuard commands are present in the PATH."""
     return shutil.which("wg") is not None and shutil.which("ip") is not None
 
 
 def _run(cmd, **kw):
-    """Exécute une commande et lève une erreur lisible en cas d'échec."""
+    """Runs a command and raises a readable error on failure."""
     return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
 
 
 # --------------------------------------------------------------------------- #
-# Génération des clés statiques Curve25519 (handshake WireGuard)               #
+# Generating the static Curve25519 keys (WireGuard handshake)                  #
 # --------------------------------------------------------------------------- #
 def generate_keypair():
-    """Retourne (private_key_b64, public_key_b64) via `wg genkey|pubkey`."""
+    """Returns (private_key_b64, public_key_b64) via `wg genkey|pubkey`."""
     priv = _run(["wg", "genkey"]).stdout.strip()
     pub = _run(["wg", "pubkey"], input=priv + "\n").stdout.strip()
     return priv, pub
 
 
 # --------------------------------------------------------------------------- #
-# Montée / descente du tunnel                                                  #
+# Bringing the tunnel up / down                                                #
 # --------------------------------------------------------------------------- #
 def bring_up(
     *,
@@ -65,35 +64,35 @@ def bring_up(
     peer_allowed_ips,
     keepalive=25,
 ):
-    """Crée l'interface `iface` et configure le pair avec le PSK hybride.
+    """Creates the `iface` interface and configures the peer with the hybrid PSK.
 
-    Paramètres :
-      private_key       : clé privée Curve25519 locale (b64)
-      local_ip          : IP interne du tunnel côté local, ex "10.9.0.1/24"
-      listen_port       : port UDP d'écoute WireGuard (int)
-      peer_public_key   : clé publique Curve25519 du pair (b64)
-      peer_psk          : PresharedKey = clé hybride QKD+PQC (b64, 32 octets)
-                          -> voir crypto_hybrid.to_wireguard_psk()
-      peer_endpoint     : "host:port" joignable du pair, ou None (côté passif)
-      peer_allowed_ips  : réseau autorisé derrière le pair, ex "10.9.0.2/32"
-      keepalive         : persistent-keepalive en secondes (traversée NAT)
+    Parameters:
+      private_key       : local Curve25519 private key (b64)
+      local_ip          : tunnel's local internal IP, e.g. "10.9.0.1/24"
+      listen_port       : WireGuard UDP listen port (int)
+      peer_public_key   : peer's Curve25519 public key (b64)
+      peer_psk          : PresharedKey = hybrid QKD+PQC key (b64, 32 bytes)
+                          -> see crypto_hybrid.to_wireguard_psk()
+      peer_endpoint     : peer's reachable "host:port", or None (passive side)
+      peer_allowed_ips  : network allowed behind the peer, e.g. "10.9.0.2/32"
+      keepalive         : persistent-keepalive in seconds (NAT traversal)
 
-    Le PSK est passé à `wg set` via un descripteur de fichier temporaire pour
-    ne pas l'exposer dans la ligne de commande / la table des processus.
+    The PSK is passed to `wg set` via a temporary file descriptor, to avoid
+    exposing it on the command line / in the process table.
     """
     if not wg_tools_available():
         raise RuntimeError(
-            "wireguard-tools/iproute2 absents (installés dans l'image Docker)."
+            "wireguard-tools/iproute2 not found (installed in the Docker image)."
         )
 
     ip_only = str(ipaddress.ip_interface(local_ip).ip)
     prefix = local_ip.split("/")[1] if "/" in local_ip else "24"
 
-    # 1) interface + adresse
+    # 1) interface + address
     _run(["ip", "link", "add", iface, "type", "wireguard"])
     _run(["ip", "address", "add", f"{ip_only}/{prefix}", "dev", iface])
 
-    # 2) clé privée + port d'écoute (via fichiers, jamais en argv)
+    # 2) private key + listen port (via files, never in argv)
     import os
     import tempfile
 
@@ -108,7 +107,7 @@ def bring_up(
               "listen-port", str(listen_port),
               "private-key", key_path])
 
-        # 3) pair + PresharedKey hybride
+        # 3) peer + hybrid PresharedKey
         peer_cmd = ["wg", "set", iface,
                     "peer", peer_public_key,
                     "preshared-key", psk_path,
@@ -127,7 +126,7 @@ def bring_up(
 
 
 def bring_down(iface="wg0"):
-    """Supprime l'interface tunnel (ignore l'erreur si déjà absente)."""
+    """Removes the tunnel interface (ignores the error if already absent)."""
     try:
         _run(["ip", "link", "del", iface])
     except subprocess.CalledProcessError:
@@ -135,7 +134,7 @@ def bring_down(iface="wg0"):
 
 
 def show(iface="wg0"):
-    """Retourne la sortie de `wg show <iface>` (diagnostic)."""
+    """Returns the output of `wg show <iface>` (diagnostics)."""
     return _run(["wg", "show", iface]).stdout
 
 
@@ -150,9 +149,9 @@ def render_config(
     peer_allowed_ips,
     keepalive=25,
 ):
-    """Rend un fichier .conf équivalent (utilisable avec `wg-quick`).
+    """Renders an equivalent .conf file (usable with `wg-quick`).
 
-    Pratique pour inspection/débogage ; `bring_up` reste la voie normale.
+    Handy for inspection/debugging; `bring_up` remains the normal path.
     """
     lines = [
         "[Interface]",

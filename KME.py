@@ -1,55 +1,54 @@
 """
-KME.py — QKD Node conforme à ETSI GS QKD 014 + structure "scheme_site".
-
-Ce module modélise une QKD Node telle que dessinée dans "scheme_site.png",
-à l'intérieur d'un périmètre de sécurité (Trusted Node) :
+This module models a QKD Node inside a security perimeter (Trusted Node):
 
     ┌─────────────── Security perimeter (Trusted Node) ───────────────┐
-    │  APPs (SAE)                                                      │
-    │     ▲                                                            │
+    │  APPs (SAE)                                                     │
+    │     ▲                                                           │
     │     │ ETSI GS QKD 014 REST API                                  │
-    │     ▼                                                            │
+    │     ▼                                                           │
     │  KeyManagement  ◄──────────────►  QKDControl                    │
-    │     │  ▲                              │  ▲                       │
-    │     ▼  │                              ▼  │                       │
+    │     │  ▲                              │  ▲                      │
+    │     ▼  │                              ▼  │                      │
     │  ┌───────────────── QKD Key Store Peers ─────────────────┐      │
-    │  │ QKDKeyStorePeer(peerA)  QKDKeyStorePeer(peerB) ...     │      │
+    │  │ QKDKeyStorePeer(peerA)  QKDKeyStorePeer(peerB) ...     │     │
     │  └───────────────────────────────────────────────────────┘      │
-    │                          ▲                                       │
-    │                          │                                       │
-    │                    ForwardingModule  ──(QKD link)──► autre Node  │
+    │                          ▲                                      │
+    │                          │                                      │
+    │                    ForwardingModule  ──(QKD link)──► other Node │
     └─────────────────────────────────────────────────────────────────┘
 
-Correspondance avec le schéma :
-  - APPs                -> les SAE clients (externes, via l'API REST)
-  - Key Management      -> classe KeyManagement : sert l'API ETSI 014 aux SAE,
-                           choisit le bon Key Store Peer, alloue/retrouve les clés
-  - QKD Control         -> classe QKDControl : pilote les Key Store Peers et le
-                           Forwarding Module (côté "réseau QKD"), pas exposé aux SAE
-  - QKD Key Store Peer  -> classe QKDKeyStorePeer : UN store par KME pair
-                           (au lieu d'un unique store global comme avant)
-  - Forwarding Module   -> classe ForwardingModule : relaie le matériel de clé
-                           vers le KME pair sur le lien QKD simulé
+Correspondence with the diagram:
+  - APPs                -> the client SAEs (external, via the REST API)
+  - Key Management      -> class KeyManagement: serves the ETSI 014 API to
+                           SAEs, picks the right Key Store Peer, allocates/
+                           retrieves keys
+  - QKD Control         -> class QKDControl: drives the Key Store Peers and
+                           the Forwarding Module (the "QKD network" side),
+                           not exposed to SAEs
+  - QKD Key Store Peer  -> class QKDKeyStorePeer: ONE store per peer KME
+                           (instead of a single global store as before)
+  - Forwarding Module   -> class ForwardingModule: relays key material to
+                           the peer KME over the simulated QKD link
 
-Endpoints exposés (inchangés côté SAE — Figure 2 / clauses 5.1-5.4) :
+Exposed endpoints:
   GET  /api/v1/keys/{slave_SAE_ID}/status
   POST /api/v1/keys/{slave_SAE_ID}/enc_keys    (master SAE -> key + key_ID)
   POST /api/v1/keys/{master_SAE_ID}/dec_keys   (slave  SAE -> key by key_ID)
-Endpoint interne (lien QKD, hors API ETSI) :
-  POST /internal/sync_keys                      (Forwarding Module du pair)
+Internal endpoint (QKD link, out of the ETSI API scope):
+  POST /internal/sync_keys                      (peer's Forwarding Module)
 
-NB : la couche cryptographique hybride (PQC ⊕ QKD, WireGuard) vit côté SAE
-(crypto_hybrid.py + wireguard.py). Le KME reste, comme le veut l'ETSI, un pur
-fournisseur de clés symétriques identiques de part et d'autre — et n'a donc
-JAMAIS de dépendance PQC.
+NB: the hybrid cryptographic layer (PQC ⊕ QKD, WireGuard) lives on the SAE
+side (crypto_hybrid.py + wireguard.py). As required by ETSI, the KME remains
+a pure supplier of identical symmetric keys on both sides — and therefore
+NEVER has a PQC dependency.
 
-Authentification (deux serveurs distincts, un seul process) :
-  - port externe (KME_PORT, défaut 8000), face aux SAE : **mTLS classique**
-    (TLS_SERVER_CERT/KEY + TLS_CA_CERT), certificat client SAE exigé
-    (CERT_REQUIRED). Ne sert que /api/v1/keys/...
-  - port interne (KME_INTERNAL_PORT, défaut 8001), face aux KME pairs : HTTP
-    en clair, INCHANGÉ — la réplication KME<->KME reste hors périmètre de
-    cette demande d'authentification. Ne sert que /internal/sync_keys.
+Authentication (two separate servers, one single process):
+  - external port (KME_PORT, default 8000), facing the SAEs: **classic
+    mTLS** (TLS_SERVER_CERT/KEY + TLS_CA_CERT), SAE client certificate
+    required (CERT_REQUIRED). Serves only /api/v1/keys/...
+  - internal port (KME_INTERNAL_PORT, default 8001), facing peer KMEs:
+    plain HTTP, UNCHANGED — KME<->KME replication remains out of scope for
+    this authentication request. Serves only /internal/sync_keys.
 """
 
 import base64
@@ -64,16 +63,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 # =========================================================================== #
-# QKD Key Store Peer  —  un store de clés par KME pair (scheme_site)           #
+# QKD Key Store Peer  —  one key store per peer KME (scheme_site)              #
 # =========================================================================== #
 class QKDKeyStorePeer:
-    """Store en mémoire du matériel de clé partagé avec UN KME pair donné.
+    """In-memory store of the key material shared with ONE given peer KME.
 
-    Sur le schéma, la QKD Node possède plusieurs "QKD Key Store Peer" empilés :
-    un par lien QKD / par pair. Chaque store détient les clés QKD réconciliées
-    avec ce pair précis. Ici la génération quantique / réconciliation / privacy
-    amplification est hors périmètre (ETSI clause 1) : on modélise le résultat,
-    à savoir un dictionnaire key_ID -> clé.
+    In the diagram, the QKD Node holds several stacked "QKD Key Store Peer"
+    instances: one per QKD link / per peer. Each store holds the QKD keys
+    reconciled with that specific peer. Here quantum generation /
+    reconciliation / privacy amplification are out of scope (ETSI clause 1):
+    we model the result, namely a key_ID -> key dictionary.
     """
 
     def __init__(self, peer_kme_id):
@@ -82,7 +81,7 @@ class QKDKeyStorePeer:
         self._lock = threading.Lock()
 
     def new_key(self, size_bits=256):
-        """Alloue une nouvelle clé (générée localement, à répliquer au pair)."""
+        """Allocates a new key (generated locally, to be replicated to the peer)."""
         key_bytes = os.urandom(size_bits // 8)
         key_b64 = base64.b64encode(key_bytes).decode("ascii")
         key_id = str(uuid.uuid4())
@@ -91,7 +90,7 @@ class QKDKeyStorePeer:
         return key_id, key_b64
 
     def put_key(self, key_id, key_b64):
-        """Enregistre une clé reçue du pair (réplication via lien QKD)."""
+        """Stores a key received from the peer (replication over the QKD link)."""
         with self._lock:
             self._keys[key_id] = key_b64
 
@@ -109,12 +108,12 @@ class QKDKeyStorePeer:
 
 
 # --------------------------------------------------------------------------- #
-# Rétro-compatibilité : SharedKeyStore                                         #
+# Backward compatibility: SharedKeyStore                                       #
 # --------------------------------------------------------------------------- #
 class SharedKeyStore(QKDKeyStorePeer):
-    """Alias historique conservé pour sae_API.demo() (un seul store partagé).
+    """Historical alias kept for sae_API.demo() (a single shared store).
 
-    Se comporte comme un QKDKeyStorePeer sans pair particulier.
+    Behaves like a QKDKeyStorePeer with no particular peer.
     """
 
     def __init__(self, peer_kme_id="PEER"):
@@ -122,25 +121,26 @@ class SharedKeyStore(QKDKeyStorePeer):
 
 
 # =========================================================================== #
-# Forwarding Module  —  relais du matériel de clé sur le lien QKD (scheme_site)#
+# Forwarding Module  —  relays key material over the QKD link (scheme_site)    #
 # =========================================================================== #
 class ForwardingModule:
-    """Pousse le matériel de clé vers le KME pair hébergeant le SAE esclave.
+    """Pushes key material to the peer KME hosting the slave SAE.
 
-    Modélise le "Forwarding Module" du schéma : c'est lui qui parle au réseau
-    QKD (ici, l'endpoint interne /internal/sync_keys du KME pair). Le routage
-    slave_SAE_ID -> URL du KME pair vient de la table KME_PEERS.
+    Models the "Forwarding Module" from the diagram: it is the one that
+    talks to the QKD network (here, the peer KME's internal
+    /internal/sync_keys endpoint). The slave_SAE_ID -> peer KME URL routing
+    comes from the KME_PEERS table.
     """
 
     def __init__(self, peers):
-        # peers : {slave_SAE_ID: peer_KME_base_url}
+        # peers: {slave_SAE_ID: peer_KME_base_url}
         self.peers = peers or {}
 
     def peer_url_for(self, sae_id):
         return self.peers.get(sae_id)
 
     def forward_keys(self, peer_url, keys):
-        """Réplique `keys` (liste de {key_ID, key}) vers le KME pair."""
+        """Replicates `keys` (list of {key_ID, key}) to the peer KME."""
         data = json.dumps({"keys": keys}).encode("utf-8")
         req = urllib.request.Request(
             peer_url.rstrip("/") + "/internal/sync_keys",
@@ -152,13 +152,14 @@ class ForwardingModule:
 
 
 # =========================================================================== #
-# QKD Control  —  pilote les Key Store Peers et le Forwarding Module           #
+# QKD Control  —  drives the Key Store Peers and the Forwarding Module         #
 # =========================================================================== #
 class QKDControl:
-    """Face "réseau QKD" de la Node (bleu sur le schéma).
+    """"QKD network" side of the Node (blue in the diagram).
 
-    Gère l'ensemble des QKDKeyStorePeer (création à la volée par pair) et
-    délègue le relais au ForwardingModule. N'est PAS exposé directement aux SAE.
+    Manages the set of QKDKeyStorePeer instances (created on the fly per
+    peer) and delegates relaying to the ForwardingModule. Is NOT exposed
+    directly to the SAEs.
     """
 
     def __init__(self, peers):
@@ -167,7 +168,7 @@ class QKDControl:
         self._lock = threading.Lock()
 
     def store_for_peer(self, peer_kme_id):
-        """Retourne (en le créant au besoin) le Key Store Peer d'un pair."""
+        """Returns (creating it if needed) a peer's Key Store Peer."""
         with self._lock:
             store = self._stores.get(peer_kme_id)
             if store is None:
@@ -176,19 +177,19 @@ class QKDControl:
             return store
 
     def peer_kme_id_for_sae(self, sae_id):
-        """Déduit un identifiant de pair à partir de l'URL de routage.
+        """Derives a peer identifier from the routing URL.
 
-        (Le mapping fin SAE->KME_ID est hors périmètre ETSI ; on dérive un id
-        stable depuis l'URL du pair pour indexer le bon store.)
+        (The fine-grained SAE->KME_ID mapping is out of ETSI scope; we
+        derive a stable id from the peer's URL to index the right store.)
         """
         url = self.forwarding.peer_url_for(sae_id)
-        return url  # l'URL fait office de clé de pair, unique par KME distant
+        return url  # the URL acts as the peer key, unique per remote KME
 
     def find_key_anywhere(self, key_id):
-        """Cherche une clé par key_ID dans tous les Key Store Peers.
+        """Looks up a key by key_ID across all Key Store Peers.
 
-        Utilisé par dec_keys : le SAE esclave demande une clé par son key_ID
-        sans savoir dans quel store-pair elle a atterri.
+        Used by dec_keys: the slave SAE requests a key by its key_ID without
+        knowing which peer-store it landed in.
         """
         with self._lock:
             stores = list(self._stores.values())
@@ -199,10 +200,10 @@ class QKDControl:
         return None
 
     def ingest_from_peer(self, keys):
-        """Range des clés reçues d'un pair (via Forwarding Module distant).
+        """Stores keys received from a peer (via the remote Forwarding Module).
 
-        On ne connaît pas forcément le pair émetteur ici ; on les place dans un
-        store dédié "inbound" pour qu'elles soient retrouvables par key_ID.
+        We don't necessarily know the sending peer here; we place them in a
+        dedicated "inbound" store so they can be found by key_ID.
         """
         store = self.store_for_peer("__inbound__")
         for item in keys:
@@ -214,14 +215,14 @@ class QKDControl:
 
 
 # =========================================================================== #
-# Key Management  —  face "applications/SAE", sert l'API ETSI 014 (scheme_site)#
+# Key Management  —  "applications/SAE" side, serves the ETSI 014 API (scheme_site) #
 # =========================================================================== #
 class KeyManagement:
-    """Face "APPs" de la Node (vert sur le schéma).
+    """"APPs" side of the Node (green in the diagram).
 
-    Implémente la logique des trois méthodes ETSI 014 en s'appuyant sur le
-    QKDControl (Key Store Peers + Forwarding Module). C'est le seul composant
-    dont dépend le handler HTTP.
+    Implements the logic of the three ETSI 014 methods, relying on
+    QKDControl (Key Store Peers + Forwarding Module). This is the only
+    component the HTTP handler depends on.
     """
 
     def __init__(self, kme_id, qkd_control, default_size=256):
@@ -229,7 +230,7 @@ class KeyManagement:
         self.qkd = qkd_control
         self.default_size = default_size
 
-    # -- clause 5.2 : Get status -------------------------------------------- #
+    # -- clause 5.2: Get status ---------------------------------------------- #
     def status(self, slave_sae_id):
         peer_url = self.qkd.forwarding.peer_url_for(slave_sae_id)
         return {
@@ -246,12 +247,12 @@ class KeyManagement:
             "max_SAE_ID_count": 0,
         }
 
-    # -- clause 5.3 : Get key (master SAE) ---------------------------------- #
+    # -- clause 5.3: Get key (master SAE) ------------------------------------ #
     def get_enc_keys(self, slave_sae_id, number, size):
-        """Alloue `number` clés dans le Key Store Peer du bon pair, puis les
-        relaie au KME distant via le Forwarding Module. Retourne la liste
-        de {key_ID, key} pour le SAE maître local."""
-        peer_key = self.qkd.peer_kme_id_for_sae(slave_sae_id)  # url ou None
+        """Allocates `number` keys in the right peer's Key Store Peer, then
+        relays them to the remote KME via the Forwarding Module. Returns the
+        list of {key_ID, key} for the local master SAE."""
+        peer_key = self.qkd.peer_kme_id_for_sae(slave_sae_id)  # url or None
         store = self.qkd.store_for_peer(peer_key or "__local__")
 
         keys = []
@@ -261,14 +262,14 @@ class KeyManagement:
 
         peer_url = self.qkd.forwarding.peer_url_for(slave_sae_id)
         if peer_url:
-            # relais vers le pair : peut lever URLError/OSError/TimeoutError
+            # relay to the peer: may raise URLError/OSError/TimeoutError
             self.qkd.forwarding.forward_keys(peer_url, keys)
         return keys
 
-    # -- clause 5.4 : Get key with key IDs (slave SAE) ---------------------- #
+    # -- clause 5.4: Get key with key IDs (slave SAE) ------------------------ #
     def get_dec_keys(self, key_ids):
-        """Retrouve les clés par key_ID dans n'importe quel Key Store Peer.
-        Lève KeyError(key_id) si une clé est introuvable (=> 400 ETSI)."""
+        """Looks up keys by key_ID in any Key Store Peer.
+        Raises KeyError(key_id) if a key cannot be found (=> 400 ETSI)."""
         keys = []
         for item in key_ids:
             kid = item["key_ID"] if isinstance(item, dict) else item
@@ -278,16 +279,16 @@ class KeyManagement:
             keys.append({"key_ID": kid, "key": key_b64})
         return keys
 
-    # -- lien QKD entrant --------------------------------------------------- #
+    # -- incoming QKD link ---------------------------------------------------- #
     def ingest_from_peer(self, keys):
         self.qkd.ingest_from_peer(keys)
 
 
 # =========================================================================== #
-# Handlers HTTP  —  traduisent l'API REST vers le Key Management               #
+# HTTP Handlers  —  translate the REST API to the Key Management layer         #
 # =========================================================================== #
 class _JSONHandlerMixin:
-    """Helpers communs de sérialisation JSON, partagés par les deux handlers."""
+    """Common JSON serialization helpers, shared by both handlers."""
 
     def _send_json(self, code, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -312,9 +313,9 @@ class _JSONHandlerMixin:
 
 
 class ExternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
-    """Face SAE (port externe, mTLS) : uniquement l'API ETSI 014 (clauses 5.1-5.4)."""
+    """SAE side (external port, mTLS): only the ETSI 014 API (clauses 5.1-5.4)."""
 
-    key_management = None  # injecté avant de servir (instance KeyManagement)
+    key_management = None  # injected before serving (KeyManagement instance)
 
     def do_GET(self):
         parts = self.path.strip("/").split("/")
@@ -336,7 +337,7 @@ class ExternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
 
         sae_id = parts[3]
 
-        # clause 5.3 : Get key (master SAE)
+        # clause 5.3: Get key (master SAE)
         if parts[4] == "enc_keys":
             number = int(body.get("number", 1))
             size = int(body.get("size", km.default_size))
@@ -348,7 +349,7 @@ class ExternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
                 return
             self._send_json(200, {"keys": keys})
 
-        # clause 5.4 : Get key with key IDs (slave SAE)
+        # clause 5.4: Get key with key IDs (slave SAE)
         elif parts[4] == "dec_keys":
             key_ids = body.get("key_IDs", [])
             if not key_ids and "key_ID" in body:
@@ -365,11 +366,11 @@ class ExternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
 
 
 class InternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
-    """Face KME pair (port interne, HTTP en clair) : uniquement le lien QKD
-    interne. Volontairement non authentifié — hors périmètre de cette
-    demande, comportement inchangé."""
+    """Peer KME side (internal port, plain HTTP): only the internal QKD
+    link. Deliberately unauthenticated — out of scope for this request,
+    behavior unchanged."""
 
-    key_management = None  # injecté avant de servir (instance KeyManagement)
+    key_management = None  # injected before serving (KeyManagement instance)
 
     def do_POST(self):
         parts = self.path.strip("/").split("/")
@@ -383,18 +384,18 @@ class InternalKMEHandler(_JSONHandlerMixin, BaseHTTPRequestHandler):
             self._send_json(404, {"message": "Not found"})
 
 
-# rétro-compatibilité : ancien nom, utilisé nulle part ailleurs mais conservé
-# au cas où du code externe importerait KMEHandler directement.
+# backward compatibility: old name, used nowhere else but kept in case some
+# external code imports KMEHandler directly.
 KMEHandler = ExternalKMEHandler
 
 
 # =========================================================================== #
-# Assemblage de la QKD Node + serveur(s)                                      #
+# Assembling the QKD Node + server(s)                                        #
 # =========================================================================== #
 def _build_tls_context(tls):
-    """Construit le SSLContext serveur mTLS à partir d'un dict
-    {cert, key, ca_cert} de chemins de fichiers. `verify_mode` = CERT_REQUIRED :
-    le client (SAE) DOIT présenter un certificat signé par la même CA."""
+    """Builds the mTLS server SSLContext from a dict
+    {cert, key, ca_cert} of file paths. `verify_mode` = CERT_REQUIRED:
+    the client (SAE) MUST present a certificate signed by the same CA."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=tls["cert"], keyfile=tls["key"])
     ctx.load_verify_locations(cafile=tls["ca_cert"])
@@ -404,21 +405,21 @@ def _build_tls_context(tls):
 
 def make_server(host, port, store=None, kme_id="KME", peers=None,
                 key_management=None, tls=None):
-    """Construit le serveur HTTP externe (face SAE) de la QKD Node.
+    """Builds the QKD Node's external HTTP server (SAE side).
 
-    Deux modes d'appel :
-      - moderne : passer `key_management` (instance KeyManagement) ;
-      - hérité  : passer `store` (SharedKeyStore) — utilisé par sae_API.demo().
-        Dans ce cas on enveloppe le store dans une QKD Node minimale.
+    Two calling modes:
+      - modern: pass `key_management` (a KeyManagement instance);
+      - legacy: pass `store` (SharedKeyStore) — used by sae_API.demo().
+        In that case the store is wrapped in a minimal QKD Node.
 
-    `tls` : dict optionnel {cert, key, ca_cert}. Si fourni, le serveur exige
-    du mTLS (CERT_REQUIRED) ; si None (démo en mémoire hors Docker), le
-    serveur reste en HTTP simple, comme avant.
+    `tls`: optional dict {cert, key, ca_cert}. If provided, the server
+    requires mTLS (CERT_REQUIRED); if None (in-memory demo outside Docker),
+    the server stays plain HTTP, as before.
     """
     if key_management is None:
         qkd = QKDControl(peers or {})
         if store is not None:
-            # réutilise le store fourni comme unique Key Store Peer
+            # reuse the given store as the sole Key Store Peer
             qkd._stores["__local__"] = store
         key_management = KeyManagement(kme_id, qkd)
 
@@ -432,8 +433,8 @@ def make_server(host, port, store=None, kme_id="KME", peers=None,
 
 
 def make_internal_server(host, port, key_management):
-    """Construit le serveur HTTP interne (face KME pairs) : HTTP en clair,
-    inchangé, hors périmètre de cette demande d'authentification."""
+    """Builds the internal HTTP server (facing peer KMEs): plain HTTP,
+    unchanged, out of scope for this authentication request."""
     handler = type("BoundInternalKMEHandler", (InternalKMEHandler,), {
         "key_management": key_management,
     })
@@ -462,7 +463,7 @@ if __name__ == "__main__":
     internal_srv = make_internal_server(host, internal_port, key_mgmt)
 
     scheme = "https (mTLS)" if tls else "http"
-    print(f"QKD Node {kme_id} : {scheme}://{host}:{port} (SAE, ETSI 014) "
+    print(f"QKD Node {kme_id}: {scheme}://{host}:{port} (SAE, ETSI 014) "
           f"+ http://{host}:{internal_port} (KME peers: {peers})")
 
     threading.Thread(target=internal_srv.serve_forever, daemon=True).start()

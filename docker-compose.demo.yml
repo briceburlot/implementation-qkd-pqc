@@ -1,7 +1,7 @@
-# Démo ETSI GS QKD 014 "simple" à 2 sites (sans HYBRID : pas de PQC/WireGuard,
-# juste le flux enc_keys/dec_keys). Authentification SAE<->KME par mTLS
-# classique (CA EC P-256, `./certs/tls`) — aucune dépendance PQC sur ce lien.
-# `pki-init` génère la PKI une fois, avant tout le reste.
+# "Plain" ETSI GS QKD 014 demo with 2 sites (without HYBRID: no PQC/WireGuard,
+# just the enc_keys/dec_keys flow). SAE<->KME authentication via classic mTLS
+# (EC P-256 CA, `./certs/tls`) — no PQC dependency on this link.
+# `pki-init` generates the PKI once, before everything else.
 services:
   pki-init:
     build: {context: ., dockerfile: Dockerfile.sae}

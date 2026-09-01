@@ -1,19 +1,19 @@
-# Démo hybride à 2 sites (Figure 2 ETSI + 4 points de img_scheme).
-# SAE_A (maître) et SAE_B (esclave) :
-#   1) clé QKD via leurs KME       2) PQC ML-KEM-768 + notif key_ID
-#   3) clé = PQC XOR QKD           4) tunnel WireGuard (PSK = clé hybride)
-# Le canal classique (key_ID, clés publiques PQC/WG, ciphertext) passe par le
-# volume partagé `chan`. Le PSK n'y transite jamais.
+# Hybrid demo with 2 sites SAE_A (master) and SAE_B (slave):
+#   1) QKD key via their KMEs      2) PQC ML-KEM-768 + key_ID notification
+#   3) key = PQC XOR QKD           4) WireGuard tunnel (PSK = hybrid key)
+# The classic channel (key_ID, PQC/WG public keys, ciphertext) goes through
+# the shared `chan` volume. The PSK never travels through it.
 #
-# Authentification :
-#   - SAE<->KME : mTLS classique (CA EC P-256, `./certs/tls`, aucune dépendance
-#     PQC) — le KME externe (port 8000) exige un certificat client valide.
-#   - SAE<->SAE (canal classique) : chaque message est signé ML-DSA-65
-#     (CRYSTALS-Dilithium) et vérifié contre le certificat d'identité du pair
-#     (`./certs/pqc`).
-#   - KME<->KME (port interne 8001, réplication) : HTTP en clair, inchangé,
-#     hors périmètre de cette authentification.
-# `pki-init` génère les deux PKI une fois, avant tout le reste.
+# Authentication:
+#   - SAE<->KME: classic mTLS (EC P-256 CA, `./certs/tls`, no PQC
+#     dependency) — the external KME (port 8000) requires a valid client
+#     certificate.
+#   - SAE<->SAE (classic channel): every message is signed with ML-DSA-65
+#     (CRYSTALS-Dilithium) and verified against the peer's identity
+#     certificate (`./certs/pqc`).
+#   - KME<->KME (internal port 8001, replication): plain HTTP, unchanged,
+#     out of scope for this authentication.
+# `pki-init` generates both PKIs once, before everything else.
 services:
   pki-init:
     build: {context: ., dockerfile: Dockerfile.sae}
@@ -67,7 +67,7 @@ services:
 
   sae-a:
     build: {context: ., dockerfile: Dockerfile.sae}
-    cap_add: ["NET_ADMIN"]                 # requis pour créer l'interface wg0
+    cap_add: ["NET_ADMIN"]                 # required to create the wg0 interface
     depends_on:
       pki-init: {condition: service_completed_successfully}
       kme-a: {condition: service_healthy}

@@ -1,6 +1,6 @@
-# QKD Node — Key Management Entity (KME) selon scheme_site + ETSI GS QKD 014.
-# Le KME reste un pur fournisseur de clés symétriques : pas besoin de liboqs
-# ni de WireGuard ici (la couche hybride vit côté SAE). Image légère.
+# QKD Node — Key Management Entity (KME) per scheme_site + ETSI GS QKD 014.
+# The KME remains a pure supplier of symmetric keys: no need for liboqs
+# or WireGuard here (the hybrid layer lives on the SAE side). Lightweight image.
 FROM python:3.12-slim
 
 WORKDIR /app

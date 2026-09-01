@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Génère un docker-compose.yml répliquant N sites (Figure 1 de l'ETSI GS QKD 014) :
-chaque site = un couple SAE + KME indépendant, tous les KME étant reliés en
-"full mesh" (chacun connaît directement les autres) pour simuler les liens QKD
-inter-sites.
+Generates a docker-compose.yml replicating N sites (Figure 1 of ETSI GS QKD 014):
+each site = an independent SAE + KME pair, with all KMEs connected in
+"full mesh" (each one directly knows the others) to simulate the inter-site
+QKD links.
 
-Usage :
+Usage:
     python3 generate-network.py A B C            # 3 sites -> docker-compose.yml
     python3 generate-network.py A B C D E -o net5.yml
 
-Les SAE générés restent "idle" (sleep infinity) : on lance une opération avec
-docker compose exec, en choisissant à la volée le rôle et le site cible, par ex :
+The generated SAEs stay "idle" (sleep infinity): an operation is launched
+with docker compose exec, picking the role and target site on the fly, e.g.:
 
     docker compose exec -e SAE_ROLE=master -e PEER_SAE_ID=SAE_C sae-a python sae_API.py
     docker compose exec -e SAE_ROLE=slave -e PEER_SAE_ID=SAE_A -e KEY_ID=<...> sae-c python sae_API.py
@@ -20,14 +20,14 @@ import argparse
 import json
 import sys
 
-# Le KME expose deux ports : externe (mTLS, face SAE, ETSI 014) et interne
-# (HTTP en clair, face KME pairs, réplication — hors périmètre auth).
+# The KME exposes two ports: external (mTLS, facing SAEs, ETSI 014) and
+# internal (plain HTTP, facing peer KMEs, replication — out of scope for auth).
 KME_EXTERNAL_PORT = 8000
 KME_INTERNAL_PORT = 8001
 
-# Le check HTTP d'origine échouerait la poignée de main TLS (il ne présente
-# pas de certificat client) : on vérifie juste que le port externe accepte
-# des connexions.
+# The original HTTP check would fail the TLS handshake (it presents no
+# client certificate): we just check that the external port accepts
+# connections.
 HEALTHCHECK_TEMPLATE = (
     "import socket; "
     "socket.create_connection(('localhost', {port}), timeout=2)"
@@ -37,14 +37,14 @@ HEALTHCHECK_TEMPLATE = (
 def build_compose(sites):
     labels = [s.upper() for s in sites]
     if len(labels) < 2:
-        raise ValueError("il faut au moins 2 sites pour qu'ils puissent communiquer")
+        raise ValueError("at least 2 sites are needed for them to communicate")
     if len(set(labels)) != len(labels):
-        raise ValueError("les noms de site doivent être uniques")
+        raise ValueError("site names must be unique")
 
     lines = ["services:"]
 
-    # --- pki-init : génère la PKI classique (mTLS) + ML-DSA (SAE<->SAE) -----
-    # une fois pour tout le réseau, dans ./certs (monté sur l'hôte).
+    # --- pki-init: generates the classical PKI (mTLS) + ML-DSA (SAE<->SAE) --
+    # once for the whole network, in ./certs (mounted on the host).
     lines += [
         "  pki-init:",
         "    build:",
@@ -103,7 +103,7 @@ def build_compose(sites):
             "    build:",
             "      context: .",
             "      dockerfile: Dockerfile.sae",
-            # NET_ADMIN : requis pour monter l'interface WireGuard (point 4).
+            # NET_ADMIN: required to bring up the WireGuard interface (point 4).
             "    cap_add:",
             "      - NET_ADMIN",
             "    depends_on:",
@@ -114,13 +114,13 @@ def build_compose(sites):
             "    environment:",
             f"      KME_URL: https://kme-{site}:{KME_EXTERNAL_PORT}",
             f"      SAE_ID: {sae_id}",
-            # canal classique partagé (key_ID, clés publiques PQC/WG, ciphertext)
+            # shared classic channel (key_ID, PQC/WG public keys, ciphertext)
             "      CHANNEL_DIR: /shared/chan",
-            # mTLS SAE<->KME (classique, aucune dépendance PQC)
+            # SAE<->KME mTLS (classical, no PQC dependency)
             "      TLS_CLIENT_CERT: /certs/client.crt",
             "      TLS_CLIENT_KEY: /certs/client.key",
             "      TLS_CA_CERT: /certs/ca.crt",
-            # ML-DSA-65 SAE<->SAE (authentifie le canal classique)
+            # ML-DSA-65 SAE<->SAE (authenticates the classic channel)
             "      PQC_CA_PUB: /certs/pqc_ca.pub",
             "      PQC_CERT_DIR: /certs/pqc_public",
             f"      PQC_CERT: /certs/pqc_public/sae_{site}.cert.json",
@@ -143,20 +143,20 @@ def build_compose(sites):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("sites", nargs="+", help="noms des sites à répliquer (ex: A B C D)")
-    parser.add_argument("-o", "--out", default="docker-compose.yml", help="fichier de sortie (défaut: docker-compose.yml)")
+    parser.add_argument("sites", nargs="+", help="names of the sites to replicate (e.g. A B C D)")
+    parser.add_argument("-o", "--out", default="docker-compose.yml", help="output file (default: docker-compose.yml)")
     args = parser.parse_args()
 
     try:
         compose = build_compose(args.sites)
     except ValueError as exc:
-        print(f"erreur: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     with open(args.out, "w") as f:
         f.write(compose)
 
-    print(f"{args.out} généré pour {len(args.sites)} sites : {', '.join(s.upper() for s in args.sites)}")
+    print(f"{args.out} generated for {len(args.sites)} sites: {', '.join(s.upper() for s in args.sites)}")
 
 
 if __name__ == "__main__":

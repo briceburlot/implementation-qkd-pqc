@@ -1,37 +1,39 @@
 """
-crypto_hybrid.py — Couche cryptographique hybride QKD + PQC.
+crypto_hybrid.py — Hybrid QKD + PQC cryptographic layer.
 
-Implémente les points 2 et 3 du schéma "img_scheme" :
+Implements points 2 and 3 of the "img_scheme" diagram:
 
-  Point 2 : établissement d'un secret partagé par cryptographie post-quantique
-            (PQC) entre SAE_A et SAE_B, via la librairie Open Quantum Safe
-            (liboqs) avec le KEM standard NIST ML-KEM-768 (ex-Kyber768).
+  Point 2: establishing a shared secret via post-quantum cryptography
+            (PQC) between SAE_A and SAE_B, via the Open Quantum Safe
+            library (liboqs) with the NIST standard KEM ML-KEM-768 (ex-Kyber768).
 
-  Point 3 : combinaison XOR des deux secrets ->  clé_finale = clé_PQC ⊕ clé_QKD
+  Point 3: XOR combination of the two secrets -> final_key = PQC_key ⊕ QKD_key
 
-Modèle de sécurité (schéma hybride) :
-    Le secret combiné reste sûr tant qu'AU MOINS un des deux canaux tient.
-    - la clé QKD protège contre un adversaire qui casserait ML-KEM ;
-    - la clé PQC protège si le lien QKD (ou son store) est compromis.
-    C'est le principe recommandé pour marier QKD et PQC.
+Security model (hybrid scheme):
+    The combined secret remains secure as long as AT LEAST one of the two
+    channels holds.
+    - the QKD key protects against an adversary who would break ML-KEM;
+    - the PQC key protects if the QKD link (or its store) is compromised.
+    This is the recommended principle for combining QKD and PQC.
 
-Le secret combiné n'est PAS utilisé directement comme clé de chiffrement : il
-sert de PresharedKey (PSK) WireGuard (voir wireguard.py, point 4). On le passe
-donc par un HKDF pour obtenir exactement 32 octets, quelle que soit la taille
-de la clé QKD demandée au KME.
+The combined secret is NOT used directly as an encryption key: it serves as
+the WireGuard PresharedKey (PSK) (see wireguard.py, point 4). It is
+therefore passed through an HKDF to obtain exactly 32 bytes, whatever the
+size of the QKD key requested from the KME.
 
-Ce module n'a aucune dépendance réseau : il est volontairement "pur" et testable
-indépendamment du transport HTTP (KME) et du tunnel (WireGuard).
+This module has no network dependency: it is deliberately "pure" and
+testable independently of the transport (HTTP for the KME) and the tunnel
+(WireGuard).
 """
 
 import base64
 import hashlib
 import hmac
 
-# Nom du mécanisme KEM tel qu'exposé par liboqs (oqs.get_enabled_kem_mechanisms()).
+# Name of the KEM mechanism as exposed by liboqs (oqs.get_enabled_kem_mechanisms()).
 PQC_KEM_ALG = "ML-KEM-768"
 
-# Taille de la clé finale (octets) : 32 = clé ChaCha20 / PresharedKey WireGuard.
+# Size of the final key (bytes): 32 = ChaCha20 key / WireGuard PresharedKey.
 FINAL_KEY_LEN = 32
 
 
@@ -39,24 +41,24 @@ FINAL_KEY_LEN = 32
 # Import liboqs (Open Quantum Safe)                                            #
 # --------------------------------------------------------------------------- #
 def _import_oqs():
-    """Importe le wrapper Python de liboqs, avec un message d'erreur explicite.
+    """Imports the Python wrapper for liboqs, with an explicit error message.
 
-    Le paquet PyPI est `liboqs-python` mais s'importe sous le nom `oqs`.
+    The PyPI package is `liboqs-python` but is imported under the name `oqs`.
     """
     try:
         import oqs  # type: ignore
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "La librairie Open Quantum Safe (module 'oqs', paquet "
-            "'liboqs-python') est introuvable. Elle est installée dans les "
-            "images Docker de ce projet ; hors Docker : voir "
+            "The Open Quantum Safe library (module 'oqs', package "
+            "'liboqs-python') was not found. It is installed in this "
+            "project's Docker images; outside Docker, see "
             "https://github.com/open-quantum-safe/liboqs-python"
         ) from exc
     return oqs
 
 
 def pqc_available():
-    """True si liboqs est importable et expose bien ML-KEM-768."""
+    """True if liboqs is importable and does expose ML-KEM-768."""
     try:
         oqs = _import_oqs()
         return PQC_KEM_ALG in oqs.get_enabled_kem_mechanisms()
@@ -65,29 +67,31 @@ def pqc_available():
 
 
 # --------------------------------------------------------------------------- #
-# Point 2 — établissement de clé PQC (ML-KEM-768)                              #
+# Point 2 — PQC key establishment (ML-KEM-768)                                 #
 # --------------------------------------------------------------------------- #
 #
-# Le KEM ML-KEM se déroule en trois temps (rôles Diffie-Hellman-like) :
+# The ML-KEM KEM proceeds in three steps (Diffie-Hellman-like roles):
 #
-#   Responder (ici SAE_B / slave) :   (public_key, secret_key) = keygen()
-#                                      -- envoie public_key -->
-#   Initiator (ici SAE_A / master) :  (ciphertext, ss) = encaps(public_key)
-#                                      <-- envoie ciphertext --
-#   Responder :                        ss = decaps(ciphertext)
+#   Responder (here SAE_B / slave):   (public_key, secret_key) = keygen()
+#                                      -- sends public_key -->
+#   Initiator (here SAE_A / master):  (ciphertext, ss) = encaps(public_key)
+#                                      <-- sends ciphertext --
+#   Responder:                        ss = decaps(ciphertext)
 #
-# Les deux parties obtiennent le MÊME secret `ss` (32 octets pour ML-KEM-768)
-# sans jamais le transmettre en clair : c'est la sécurité MLWE de ML-KEM.
+# Both parties obtain the SAME secret `ss` (32 bytes for ML-KEM-768) without
+# ever transmitting it in the clear: this is the MLWE security of ML-KEM.
 
 
 class PqcResponder:
-    """Côté qui génère la paire de clés et déchiffre (décapsule).
+    """Side that generates the key pair and decrypts (decapsulates).
 
-    Dans notre orchestration c'est le SAE esclave (SAE_B) : il publie sa clé
-    publique, reçoit le ciphertext du maître, et récupère le secret partagé.
+    In our orchestration this is the slave SAE (SAE_B): it publishes its
+    public key, receives the ciphertext from the master, and recovers the
+    shared secret.
 
-    L'objet conserve la clé secrète en interne (état de liboqs) entre keygen()
-    et decapsulate() : il faut donc garder la même instance vivante.
+    The object keeps the secret key internally (liboqs state) between
+    keygen() and decapsulate(): the same instance must therefore be kept
+    alive.
     """
 
     def __init__(self, alg=PQC_KEM_ALG):
@@ -95,15 +99,15 @@ class PqcResponder:
         self._kem = oqs.KeyEncapsulation(alg)
 
     def public_key(self):
-        """Génère la paire et retourne la clé publique (bytes) à publier."""
+        """Generates the pair and returns the public key (bytes) to publish."""
         return self._kem.generate_keypair()
 
     def decapsulate(self, ciphertext):
-        """Récupère le secret partagé PQC à partir du ciphertext reçu."""
+        """Recovers the PQC shared secret from the received ciphertext."""
         return bytes(self._kem.decap_secret(ciphertext))
 
     def close(self):
-        # liboqs libère le matériel secret ; supporte le context manager.
+        # liboqs frees the secret material; supports the context manager.
         try:
             self._kem.free()
         except Exception:
@@ -117,10 +121,10 @@ class PqcResponder:
 
 
 def pqc_initiator_encapsulate(peer_public_key, alg=PQC_KEM_ALG):
-    """Côté initiateur (SAE maître) : encapsule sous la clé publique du pair.
+    """Initiator side (master SAE): encapsulates under the peer's public key.
 
-    Retourne (ciphertext, shared_secret). Le ciphertext est envoyé au
-    responder ; shared_secret est identique de part et d'autre.
+    Returns (ciphertext, shared_secret). The ciphertext is sent to the
+    responder; shared_secret is identical on both sides.
     """
     oqs = _import_oqs()
     with oqs.KeyEncapsulation(alg) as kem:
@@ -129,22 +133,22 @@ def pqc_initiator_encapsulate(peer_public_key, alg=PQC_KEM_ALG):
 
 
 # --------------------------------------------------------------------------- #
-# Point 3 — combinaison XOR + dérivation vers la clé finale                    #
+# Point 3 — XOR combination + derivation to the final key                     #
 # --------------------------------------------------------------------------- #
 def xor_bytes(a, b):
-    """XOR octet-à-octet. Les deux entrées doivent avoir la même longueur."""
+    """Byte-by-byte XOR. Both inputs must have the same length."""
     if len(a) != len(b):
         raise ValueError(
-            f"XOR : longueurs différentes ({len(a)} vs {len(b)} octets)"
+            f"XOR: different lengths ({len(a)} vs {len(b)} bytes)"
         )
     return bytes(x ^ y for x, y in zip(a, b))
 
 
 def _hkdf_sha256(ikm, length, salt=b"", info=b""):
-    """HKDF (RFC 5869) sur SHA-256 — sans dépendance externe.
+    """HKDF (RFC 5869) over SHA-256 — no external dependency.
 
-    Sert à ramener le secret combiné à exactement `length` octets, en le
-    mélangeant de façon irréversible (extract + expand).
+    Used to bring the combined secret down to exactly `length` bytes, mixing
+    it irreversibly (extract + expand).
     """
     if not salt:
         salt = b"\x00" * hashlib.sha256().digest_size
@@ -158,12 +162,12 @@ def _hkdf_sha256(ikm, length, salt=b"", info=b""):
 
 
 def combine_keys(qkd_key, pqc_key, length=FINAL_KEY_LEN):
-    """Point 3 du schéma : clé_finale = HKDF( clé_PQC ⊕ clé_QKD ).
+    """Point 3 of the scheme: final_key = HKDF( PQC_key ⊕ QKD_key ).
 
-    `qkd_key` et `pqc_key` sont des bytes. Ils doivent avoir la même longueur
-    (on demande donc au KME une clé QKD de 256 bits = 32 octets, comme le
-    secret ML-KEM-768). Le XOR est mélangé par HKDF pour produire une clé de
-    `length` octets utilisable telle quelle comme PSK WireGuard.
+    `qkd_key` and `pqc_key` are bytes. They must have the same length (we
+    therefore request a 256-bit = 32-byte QKD key from the KME, matching the
+    ML-KEM-768 secret). The XOR is mixed via HKDF to produce a `length`-byte
+    key usable as-is as a WireGuard PSK.
     """
     xored = xor_bytes(qkd_key, pqc_key)
     return _hkdf_sha256(
@@ -175,53 +179,53 @@ def combine_keys(qkd_key, pqc_key, length=FINAL_KEY_LEN):
 
 
 def combine_keys_from_b64(qkd_key_b64, pqc_key_bytes, length=FINAL_KEY_LEN):
-    """Variante pratique : la clé QKD arrive en base64 (format ETSI 6.3)."""
+    """Convenience variant: the QKD key arrives in base64 (ETSI 6.3 format)."""
     qkd_key = base64.b64decode(qkd_key_b64)
     return combine_keys(qkd_key, pqc_key_bytes, length)
 
 
 def to_wireguard_psk(final_key):
-    """Encode la clé finale (32 octets) au format PresharedKey WireGuard.
+    """Encodes the final key (32 bytes) in WireGuard PresharedKey format.
 
-    WireGuard attend une clé de 32 octets encodée en base64 standard.
+    WireGuard expects a 32-byte key encoded in standard base64.
     """
     if len(final_key) != 32:
-        raise ValueError("Une PresharedKey WireGuard fait exactement 32 octets")
+        raise ValueError("A WireGuard PresharedKey must be exactly 32 bytes")
     return base64.b64encode(final_key).decode("ascii")
 
 
 # --------------------------------------------------------------------------- #
-# Démonstration autonome (sans réseau ni Docker)                              #
+# Standalone demo (no network, no Docker)                                     #
 # --------------------------------------------------------------------------- #
 def _self_demo():
-    """Rejoue points 2 + 3 en mémoire pour vérifier que les deux côtés
-    aboutissent à la même clé finale."""
+    """Replays points 2 + 3 in memory to check that both sides end up with
+    the same final key."""
     import os
 
-    # --- Point 1 (simulé) : les deux SAE partagent DÉJÀ la même clé QKD ------
-    # (dans le vrai flux elle vient du KME via l'API ETSI 014, même key_ID)
+    # --- Point 1 (simulated): both SAEs ALREADY share the same QKD key ------
+    # (in the real flow it comes from the KME via the ETSI 014 API, same key_ID)
     qkd_key = os.urandom(32)
 
-    # --- Point 2 : établissement PQC ML-KEM-768 ------------------------------
+    # --- Point 2: PQC ML-KEM-768 establishment -------------------------------
     if not pqc_available():
-        print("liboqs indisponible ici : démo PQC sautée (OK en Docker).")
+        print("liboqs unavailable here: PQC demo skipped (OK in Docker).")
         return
 
     responder = PqcResponder()             # SAE_B
-    pub = responder.public_key()           # SAE_B -> SAE_A : clé publique
-    ct, ss_a = pqc_initiator_encapsulate(pub)   # SAE_A encapsule
-    ss_b = responder.decapsulate(ct)       # SAE_B décapsule
+    pub = responder.public_key()           # SAE_B -> SAE_A: public key
+    ct, ss_a = pqc_initiator_encapsulate(pub)   # SAE_A encapsulates
+    ss_b = responder.decapsulate(ct)       # SAE_B decapsulates
     responder.close()
-    assert ss_a == ss_b, "les secrets PQC diffèrent !"
-    print(f"secret PQC partagé : {ss_a.hex()[:32]}... ({len(ss_a)} octets)")
+    assert ss_a == ss_b, "PQC secrets differ!"
+    print(f"shared PQC secret : {ss_a.hex()[:32]}... ({len(ss_a)} bytes)")
 
-    # --- Point 3 : XOR + dérivation -----------------------------------------
+    # --- Point 3: XOR + derivation -----------------------------------------
     final_a = combine_keys(qkd_key, ss_a)
     final_b = combine_keys(qkd_key, ss_b)
-    assert final_a == final_b, "les clés combinées diffèrent !"
-    print(f"clé finale (PSK)   : {final_a.hex()}")
-    print(f"PSK WireGuard b64  : {to_wireguard_psk(final_a)}")
-    print("OK : les deux côtés obtiennent une clé identique.")
+    assert final_a == final_b, "combined keys differ!"
+    print(f"final key (PSK)   : {final_a.hex()}")
+    print(f"WireGuard PSK b64 : {to_wireguard_psk(final_a)}")
+    print("OK: both sides obtain an identical key.")
 
 
 if __name__ == "__main__":

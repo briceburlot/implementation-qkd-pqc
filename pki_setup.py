@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-pki_setup.py — Provisionne les deux PKI du réseau simulé, pour une liste de
-sites donnée (mêmes labels que `generate-network.py`) :
+pki_setup.py — Provisions the two PKIs of the simulated network, for a given
+list of sites (same labels as `generate-network.py`):
 
-  1) PKI classique (EC P-256, via `cryptography`) pour le mTLS SAE<->KME :
-     une CA, un certificat serveur par KME, un certificat client par SAE.
-     Volontairement 100% classique : c'est le lien qui ne doit PAS dépendre
-     de PQC.
+  1) Classical PKI (EC P-256, via `cryptography`) for SAE<->KME mTLS:
+     one CA, one server certificate per KME, one client certificate per SAE.
+     Deliberately 100% classical: this is the link that must NOT depend on
+     PQC.
 
-  2) PKI ML-DSA-65 (via liboqs, `pqc_cert.py`) pour authentifier le canal
-     classique SAE<->SAE : une CA, un certificat d'identité par SAE.
+  2) ML-DSA-65 PKI (via liboqs, `pqc_cert.py`) to authenticate the classic
+     SAE<->SAE channel: one CA, one identity certificate per SAE.
 
-Exécuté une fois via le service compose `pki-init` (image SAE, qui a déjà
-liboqs + cryptography), écrit dans /certs (monté depuis ./certs sur l'hôte).
-Idempotent : ne régénère jamais une CA ou un certificat déjà présent, ce qui
-permet d'ajouter un site à un réseau existant sans invalider les autres.
+Run once via the `pki-init` compose service (SAE image, which already has
+liboqs + cryptography), writes to /certs (mounted from ./certs on the host).
+Idempotent: never regenerates a CA or certificate that already exists, which
+allows adding a site to an existing network without invalidating the others.
 
-Usage :
+Usage:
     python3 pki_setup.py A B C            # sites -> /certs/...
 """
 
@@ -37,11 +37,11 @@ PQC_DIR = os.path.join(CERTS_ROOT, "pqc")
 PQC_PUBLIC_DIR = os.path.join(PQC_DIR, "public")
 PQC_PRIVATE_DIR = os.path.join(PQC_DIR, "private")
 
-VALID_DAYS = 3650  # 10 ans : PKI de simulation, pas de rotation à gérer
+VALID_DAYS = 3650  # 10 years: simulation PKI, no rotation to manage
 
 
 # =========================================================================== #
-# PKI classique (EC P-256) — mTLS SAE<->KME                                   #
+# Classical PKI (EC P-256) — SAE<->KME mTLS                                   #
 # =========================================================================== #
 def _write_pem_key(path, key):
     with open(path, "wb") as f:
@@ -69,13 +69,13 @@ def ensure_classical_ca():
     ca_key_path = os.path.join(TLS_DIR, "ca.key")
     ca_crt_path = os.path.join(TLS_DIR, "ca.crt")
     if os.path.exists(ca_key_path) and os.path.exists(ca_crt_path):
-        print("[tls] CA classique déjà présente, conservée")
+        print("[tls] classical CA already present, kept")
         return
 
     os.makedirs(TLS_DIR, exist_ok=True)
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "QKD-Sim Root CA (classique)"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "QKD-Sim Root CA (classical)"),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -97,15 +97,15 @@ def ensure_classical_ca():
     )
     _write_pem_key(ca_key_path, key)
     _write_pem_cert(ca_crt_path, cert)
-    print("[tls] CA classique générée (EC P-256)")
+    print("[tls] classical CA generated (EC P-256)")
 
 
 def ensure_leaf_cert(common_name, filename_stem, *, san_dns=None, is_server):
-    """Génère (si absent) un certificat de feuille signé par la CA classique."""
+    """Generates (if missing) a leaf certificate signed by the classical CA."""
     crt_path = os.path.join(TLS_DIR, f"{filename_stem}.crt")
     key_path = os.path.join(TLS_DIR, f"{filename_stem}.key")
     if os.path.exists(crt_path) and os.path.exists(key_path):
-        print(f"[tls] certificat {filename_stem} déjà présent, conservé")
+        print(f"[tls] certificate {filename_stem} already present, kept")
         return
 
     ca_key, ca_cert = _load_ca()
@@ -138,31 +138,31 @@ def ensure_leaf_cert(common_name, filename_stem, *, san_dns=None, is_server):
 
     _write_pem_key(key_path, key)
     _write_pem_cert(crt_path, cert)
-    print(f"[tls] certificat {filename_stem} généré (CN={common_name})")
+    print(f"[tls] certificate {filename_stem} generated (CN={common_name})")
 
 
 # =========================================================================== #
-# PKI ML-DSA-65 — authentification du canal classique SAE<->SAE               #
+# ML-DSA-65 PKI — authentication of the classic SAE<->SAE channel             #
 # =========================================================================== #
 def ensure_pqc_ca():
     priv_path = os.path.join(PQC_DIR, "ca_priv.key")
     pub_path = os.path.join(PQC_DIR, "ca_pub.key")
     if os.path.exists(priv_path) and os.path.exists(pub_path):
-        print("[pqc] CA ML-DSA déjà présente, conservée")
+        print("[pqc] ML-DSA CA already present, kept")
         return
 
     os.makedirs(PQC_DIR, exist_ok=True)
     secret_key, public_key = pqc_cert.generate_keypair()
     pqc_cert.save_bytes(priv_path, secret_key)
     pqc_cert.save_bytes(pub_path, public_key)
-    print(f"[pqc] CA ML-DSA générée ({pqc_cert.PQC_SIG_ALG})")
+    print(f"[pqc] ML-DSA CA generated ({pqc_cert.PQC_SIG_ALG})")
 
 
 def ensure_sae_pqc_identity(sae_id, filename_stem):
     priv_path = os.path.join(PQC_PRIVATE_DIR, f"{filename_stem}.key")
     cert_path = os.path.join(PQC_PUBLIC_DIR, f"{filename_stem}.cert.json")
     if os.path.exists(priv_path) and os.path.exists(cert_path):
-        print(f"[pqc] identité {sae_id} déjà présente, conservée")
+        print(f"[pqc] identity {sae_id} already present, kept")
         return
 
     os.makedirs(PQC_PRIVATE_DIR, exist_ok=True)
@@ -174,7 +174,7 @@ def ensure_sae_pqc_identity(sae_id, filename_stem):
 
     pqc_cert.save_bytes(priv_path, secret_key)
     pqc_cert.save_json(cert_path, cert)
-    print(f"[pqc] identité {sae_id} générée et certifiée")
+    print(f"[pqc] identity {sae_id} generated and certified")
 
 
 # =========================================================================== #
@@ -196,7 +196,7 @@ def main():
         ensure_leaf_cert(f"SAE_{label}", f"sae_{site}", is_server=False)
         ensure_sae_pqc_identity(f"SAE_{label}", f"sae_{site}")
 
-    print(f"PKI prête pour {len(sites)} site(s) : {', '.join(sites)}")
+    print(f"PKI ready for {len(sites)} site(s): {', '.join(sites)}")
 
 
 if __name__ == "__main__":
